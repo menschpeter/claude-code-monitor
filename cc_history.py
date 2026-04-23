@@ -17,6 +17,83 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from datetime import datetime as _datetime
+
+
+@dataclass
+class UsageSample:
+    """One deduplicated usage observation tied to a requestId."""
+    ts: float
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_creation: int = 0
+    cache_read: int = 0
+
+    @property
+    def total(self) -> int:
+        return (
+            self.input_tokens + self.output_tokens
+            + self.cache_creation + self.cache_read
+        )
+
+
+def parse_ts(raw: str | None) -> float | None:
+    if not raw:
+        return None
+    try:
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        return _datetime.fromisoformat(raw).timestamp()
+    except ValueError:
+        return None
+
+
+def extract_usage(entry: dict) -> tuple[str | None, "UsageSample | None"]:
+    """Pull (requestId, UsageSample) out of one JSONL line, or (None, None)."""
+    if entry.get("type") != "assistant":
+        return None, None
+    msg = entry.get("message") or {}
+    usage = msg.get("usage") or {}
+    if not usage:
+        return None, None
+    req_id = (
+        entry.get("requestId")
+        or msg.get("id")
+        or msg.get("request_id")
+    )
+    ts = parse_ts(entry.get("timestamp"))
+    if ts is None:
+        return None, None
+    return req_id, UsageSample(
+        ts=ts,
+        input_tokens=int(usage.get("input_tokens") or 0),
+        output_tokens=int(usage.get("output_tokens") or 0),
+        cache_creation=int(usage.get("cache_creation_input_tokens") or 0),
+        cache_read=int(usage.get("cache_read_input_tokens") or 0),
+    )
+
+
+def merge_sample(
+    existing: "UsageSample | None", new: "UsageSample",
+) -> "UsageSample":
+    """MAX merge: streaming duplicates hold placeholder values."""
+    if existing is None:
+        return new
+    return UsageSample(
+        ts=max(existing.ts, new.ts),
+        input_tokens=max(existing.input_tokens, new.input_tokens),
+        output_tokens=max(existing.output_tokens, new.output_tokens),
+        cache_creation=max(existing.cache_creation, new.cache_creation),
+        cache_read=max(existing.cache_read, new.cache_read),
+    )
+
+
+def humanize_project(encoded: str) -> str:
+    if encoded.startswith("-"):
+        encoded = encoded[1:]
+    parts = encoded.split("-")
+    return parts[-1] if parts else encoded
+
 
 @dataclass
 class DailySessionEntry:
@@ -217,3 +294,98 @@ class HistoryLogger:
         payload.pop("generated_at", None)  # monthly lines drop it
         with monthly.open("a") as f:
             f.write(json.dumps(payload, sort_keys=True) + "\n")
+
+    # -- reconstruction -------------------------------------------------
+
+    def reconstruct_missing_days(
+        self,
+        today,
+        projects_dir: Path,
+    ) -> None:
+        """For each of the last DAILY_KEEP_DAYS calendar days (inclusive),
+        if no daily file exists AND JSONL data shows activity on that day,
+        write a reconstructed DailyRecord. Never overwrites a live file.
+        """
+        if not self.enabled or not projects_dir.exists():
+            return
+
+        from datetime import date as date_cls, datetime, timedelta
+
+        self.daily_dir.mkdir(parents=True, exist_ok=True)
+
+        target_dates = {
+            today - timedelta(days=i)
+            for i in range(self.DAILY_KEEP_DAYS)
+        }
+        # Skip dates that already have a live file.
+        missing = {
+            d for d in target_dates
+            if not (self.daily_dir / f"{d.isoformat()}.json").exists()
+        }
+        if not missing:
+            return
+
+        # date -> session_id -> {"project": str, "samples": dict[str, UsageSample]}
+        by_day: dict[date_cls, dict[str, dict]] = {d: {} for d in missing}
+
+        for project_dir in projects_dir.iterdir():
+            if not project_dir.is_dir():
+                continue
+            project = humanize_project(project_dir.name)
+            for jsonl in project_dir.glob("*.jsonl"):
+                session_id = jsonl.stem
+                try:
+                    with jsonl.open() as f:
+                        for raw in f:
+                            if not raw.strip():
+                                continue
+                            try:
+                                entry = json.loads(raw)
+                            except json.JSONDecodeError:
+                                continue
+                            req_id, sample = extract_usage(entry)
+                            if sample is None:
+                                continue
+                            d = datetime.fromtimestamp(sample.ts).date()
+                            if d not in missing:
+                                continue
+                            bucket = by_day[d].setdefault(
+                                session_id,
+                                {"project": project, "samples": {}},
+                            )
+                            key = req_id or f"ts:{sample.ts}"
+                            bucket["samples"][key] = merge_sample(
+                                bucket["samples"].get(key), sample,
+                            )
+                except OSError:
+                    continue
+
+        for d, sessions_map in by_day.items():
+            if not sessions_map:
+                continue  # no activity that day → no file written
+            entries: dict[str, DailySessionEntry] = {}
+            for sid, bucket in sessions_map.items():
+                samples = list(bucket["samples"].values())
+                if not samples:
+                    continue
+                first_ts = min(s.ts for s in samples)
+                last_ts = max(s.ts for s in samples)
+                entries[sid] = DailySessionEntry(
+                    project=bucket["project"],
+                    model=None,
+                    first_ts=first_ts,
+                    last_ts=last_ts,
+                    input_tokens=sum(s.input_tokens for s in samples),
+                    output_tokens=sum(s.output_tokens for s in samples),
+                    cache_read_tokens=sum(s.cache_read for s in samples),
+                    cache_creation_tokens=sum(s.cache_creation for s in samples),
+                    cost_usd=None,
+                )
+            rec = DailyRecord(
+                date=d.isoformat(),
+                reconstructed=True,
+                generated_at=datetime.now().timestamp(),
+                sessions=entries,
+            )
+            target = self.daily_dir / f"{d.isoformat()}.json"
+            self._atomic_write_json(target, rec.to_dict())

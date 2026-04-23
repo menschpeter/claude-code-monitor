@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from cc_history import DailyRecord, DailySessionEntry, HistoryLogger
+from datetime import date as date_cls
 
 
 def test_daily_record_round_trip():
@@ -98,9 +99,6 @@ def test_write_today_disabled_is_noop(tmp_path):
     logger = HistoryLogger(history_dir=tmp_path, enabled=False)
     logger.write_today(date="2026-04-23", entries={}, now_ts=0.0)
     assert not (tmp_path / "daily").exists()
-
-
-from datetime import date as date_cls
 
 
 def _write_daily_fixture(
@@ -201,3 +199,122 @@ def test_retention_keeps_at_most_12_monthly_files(tmp_path):
     assert "2025-02.jsonl" not in remaining
     assert "2025-03.jsonl" in remaining
     assert "2026-02.jsonl" in remaining
+
+
+def _write_jsonl(path: Path, entries: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as f:
+        for e in entries:
+            f.write(json.dumps(e) + "\n")
+
+
+def _iso(year, month, day, hour=12, minute=0, second=0) -> str:
+    return f"{year:04d}-{month:02d}-{day:02d}T{hour:02d}:{minute:02d}:{second:02d}Z"
+
+
+def test_reconstruct_missing_days_from_jsonl(tmp_path):
+    projects = tmp_path / "projects"
+    history = tmp_path / "history"
+
+    session_uuid = "abcd1234-abcd-abcd-abcd-abcd12340001"
+    project_dir = projects / "-Users-peter-code-myproj"
+    _write_jsonl(
+        project_dir / f"{session_uuid}.jsonl",
+        [
+            {
+                "type": "assistant",
+                "requestId": "r1",
+                "timestamp": _iso(2026, 4, 22, 10, 0, 0),
+                "message": {
+                    "usage": {
+                        "input_tokens": 100, "output_tokens": 50,
+                        "cache_read_input_tokens": 500,
+                        "cache_creation_input_tokens": 10,
+                    },
+                },
+            },
+            # same day, second request
+            {
+                "type": "assistant",
+                "requestId": "r2",
+                "timestamp": _iso(2026, 4, 22, 11, 30, 0),
+                "message": {
+                    "usage": {
+                        "input_tokens": 200, "output_tokens": 80,
+                        "cache_read_input_tokens": 100,
+                        "cache_creation_input_tokens": 0,
+                    },
+                },
+            },
+            # next day, should land in a different file
+            {
+                "type": "assistant",
+                "requestId": "r3",
+                "timestamp": _iso(2026, 4, 23, 9, 0, 0),
+                "message": {
+                    "usage": {
+                        "input_tokens": 1, "output_tokens": 1,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 0,
+                    },
+                },
+            },
+        ],
+    )
+
+    logger = HistoryLogger(history_dir=history, enabled=True)
+    logger.reconstruct_missing_days(
+        today=date_cls(2026, 4, 23),
+        projects_dir=projects,
+    )
+
+    f22 = history / "daily" / "2026-04-22.json"
+    f23 = history / "daily" / "2026-04-23.json"
+    assert f22.exists()
+    assert f23.exists()
+
+    rec22 = json.loads(f22.read_text())
+    assert rec22["reconstructed"] is True
+    assert session_uuid in rec22["sessions"]
+    s = rec22["sessions"][session_uuid]
+    assert s["input_tokens"] == 300
+    assert s["output_tokens"] == 130
+    assert s["cache_read_tokens"] == 600
+    assert s["cache_creation_tokens"] == 10
+    assert s["cost_usd"] is None
+    assert s["project"] == "myproj"
+    assert rec22["totals"]["cost_usd"] is None
+
+
+def test_reconstruct_does_not_overwrite_live_file(tmp_path):
+    projects = tmp_path / "projects"
+    history = tmp_path / "history"
+    (history / "daily").mkdir(parents=True)
+    # Existing LIVE file for 2026-04-22
+    live = DailyRecord(
+        date="2026-04-22", reconstructed=False, generated_at=123.0,
+        sessions={},
+    )
+    (history / "daily" / "2026-04-22.json").write_text(json.dumps(live.to_dict()))
+
+    # Even if JSONL data exists for that date, reconstruct must skip it.
+    session_uuid = "ffff0000-0000-0000-0000-000000000001"
+    _write_jsonl(
+        projects / "-proj" / f"{session_uuid}.jsonl",
+        [{
+            "type": "assistant", "requestId": "r1",
+            "timestamp": _iso(2026, 4, 22, 10, 0, 0),
+            "message": {"usage": {"input_tokens": 999, "output_tokens": 999}},
+        }],
+    )
+
+    logger = HistoryLogger(history_dir=history, enabled=True)
+    logger.reconstruct_missing_days(
+        today=date_cls(2026, 4, 23),
+        projects_dir=projects,
+    )
+
+    rec = json.loads((history / "daily" / "2026-04-22.json").read_text())
+    assert rec["reconstructed"] is False
+    assert rec["generated_at"] == 123.0
+    assert rec["sessions"] == {}
