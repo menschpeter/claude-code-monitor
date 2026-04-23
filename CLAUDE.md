@@ -4,10 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Purpose
 
-A two-piece tool for observing Claude Code token usage and cost in real time:
+A three-piece tool for observing Claude Code token usage and cost in real time:
 
 - `cc-monitor-hook.sh` — a `statusLine` hook that both renders Claude Code's status bar AND dumps a per-session snapshot JSON to disk on every turn.
 - `cc-session-monitor.py` — a `rich`-based TUI that reads those snapshots plus the Claude Code JSONL transcripts and shows live token/cost/velocity tables per session.
+- `cc_history.py` — a persistence layer the TUI imports: one JSON file per calendar day under `~/.claude/session-monitor/history/daily/`, rolled into monthly JSONL files with bounded retention. Missing days in the last 3 are reconstructed from JSONL on startup.
 
 ## Commands
 
@@ -28,7 +29,11 @@ A two-piece tool for observing Claude Code token usage and cost in real time:
 echo '{"session_id":"test", ...}' | ./cc-monitor-hook.sh
 ```
 
-There is no build step, no lint config, and no test suite. The project is two standalone scripts.
+There is no build step and no lint config. Unit tests (covering `cc_history.py` only):
+
+```bash
+./.venv/bin/pytest tests/ -v
+```
 
 ## Architecture
 
@@ -45,3 +50,5 @@ There is no build step, no lint config, and no test suite. The project is two st
 **Hook performance constraints** (from the Claude Code docs, reproduced in the hook header): the script runs on every turn, is throttled to 300 ms, and a newer turn *kills* an in-flight run. So the hook must stay fast: no network calls, `set -u` but deliberately NOT `set -e` (a broken snapshot must never blank the status bar), and the snapshot is always written to a temp file then renamed. `jq` missing is handled gracefully — the raw payload is dumped to `_last-raw.json` and a minimal status line is printed.
 
 **Project-name humanization.** Claude Code encodes a project's cwd as a directory name like `-Users-peter-code-myproj`. `_humanize_project` takes only the last `-`-split segment. If you change that scheme, update the decoder here AND the TUI's Project column will silently break.
+
+**History logger split.** `cc_history.py` owns daily/monthly persistence plus the shared JSONL parsing helpers (`parse_ts`, `extract_usage`, `merge_sample`, `humanize_project`, and the `UsageSample` dataclass). `cc-session-monitor.py` imports them with `_`-prefixed aliases to preserve existing call sites; do not re-implement these locally. The logger is intentionally stateless across runs — every startup re-runs retention and fills missing-day gaps by scanning JSONL. Reconstructed files set `cost_usd: null` because the cumulative hook snapshot is not safely attributable to one post-hoc day. Write cadence is every 60 s in the main loop plus an `atexit` flush; both call `run_retention` so a monitor spanning midnight rolls yesterday into monthly at the first post-midnight tick.

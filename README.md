@@ -193,6 +193,55 @@ Thresholds for the velocity colors are hard-coded in `_fmt_velocity` (cc-session
 - **Atomic snapshots**: the hook writes to a temp path then `mv`s it — a partially written file can never confuse the reader.
 - **Performance**: the hook stays well under Claude Code's 300 ms turn throttle (no network, `jq` only, single stdin read).
 
+## History
+
+The monitor persists a JSON snapshot per calendar day to `~/.claude/session-monitor/history/daily/YYYY-MM-DD.json`. Every 60 seconds and on Ctrl-C shutdown the file is refreshed with the state of every session that had activity on that local date.
+
+### Retention
+
+- **Daily files**: today + the previous 2 days (3 total).
+- **Older days**: appended as one line to `history/monthly/YYYY-MM.jsonl` and the daily file is deleted. Dedup-safe: re-running retention never duplicates a day.
+- **Monthly files**: the 12 most recent are kept, older ones are deleted. Max on disk ≈ 3 daily + 12 monthly files.
+
+### Reconstruction
+
+If the monitor was not running yesterday or the day before, those daily files are reconstructed from Claude Code's JSONL transcripts on the next startup. Reconstructed files have `"reconstructed": true` and `"cost_usd": null` on every session, because the cumulative cost snapshot in the hook's data cannot be reliably attributed to one specific day after the fact. Token counts are still accurate (modulo the known JSONL placeholder issue).
+
+### CLI
+
+```
+--no-log           disable history logging entirely
+--history-dir P    alternate location (default: ~/.claude/session-monitor/history)
+```
+
+### File format
+
+Daily JSON (and one JSONL line in the monthly file, minus `generated_at`):
+
+```json
+{
+  "date": "2026-04-23",
+  "reconstructed": false,
+  "generated_at": 1745403600.0,
+  "sessions": {
+    "<session_uuid>": {
+      "project": "foo",
+      "model": "Opus",
+      "first_ts": 1745382000.0,
+      "last_ts": 1745400000.0,
+      "input_tokens": 12345,
+      "output_tokens": 6789,
+      "cache_read_tokens": 98765,
+      "cache_creation_tokens": 4321,
+      "cost_usd": 2.34
+    }
+  },
+  "totals": { "sessions": 1, "input_tokens": 12345, "...": "same fields summed" }
+}
+```
+
+`sessions` is keyed by session UUID so external tools can join/diff across days. Token counts are the sum of usage samples whose timestamps fell within that local calendar date — not cumulative session totals. `cost_usd` is taken from the hook's cumulative `total_cost_usd` at the most recent tick of that day; for reconstructed files it is `null`.
+
 ## Known limitations
 
 - **JSONL input/output tokens undercount.** This is a property of Claude Code's transcripts (see [gille.ai's analysis](https://gille.ai/)), not of this tool. Until the hook has fired at least once for a session, the TUI falls back to JSONL values and marks the row `○` to flag that they're approximate.
@@ -204,9 +253,11 @@ Thresholds for the velocity colors are hard-coded in `_fmt_velocity` (cc-session
 ```
 .
 ├── cc-session-monitor.py   # the TUI
+├── cc_history.py           # persistent per-day logger + retention + reconstruction
 ├── cc-monitor-hook.sh      # the statusLine hook
 ├── run-monitor.sh          # convenience wrapper (uses ./.venv)
 ├── install_cc-monitor.md   # short install note (DE)
+├── tests/                  # pytest unit tests for cc_history
 └── CLAUDE.md               # guidance for Claude Code working in this repo
 ```
 
