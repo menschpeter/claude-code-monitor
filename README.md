@@ -33,7 +33,7 @@ Rows in the TUI are marked `●` (hook-backed, accurate cost + tokens) or `○` 
 ## Requirements
 
 - Python 3.10+
-- [`rich`](https://pypi.org/project/rich/) — `pip install rich`
+- [`rich`](https://pypi.org/project/rich/) (pinned in `requirements.txt`)
 - `jq` on `PATH` — `brew install jq` / `apt install jq`
 - Claude Code installed and having run at least once (so `~/.claude/` exists)
 
@@ -41,7 +41,7 @@ Rows in the TUI are marked `●` (hook-backed, accurate cost + tokens) or `○` 
 
 ```bash
 # 1. Install Python deps
-pip install rich
+pip install -r requirements.txt
 
 # 2. Install the statusLine hook into ~/.claude/ and patch settings.json
 python cc-session-monitor.py --install-hook
@@ -268,9 +268,11 @@ Daily JSON (and one JSONL line in the monthly file, minus `generated_at`):
 There is no build step and no lint config. Unit tests (pytest, covering `cc_history.py` only):
 
 ```bash
-./.venv/bin/pip install pytest    # first time only
+./.venv/bin/pip install -r requirements-dev.txt    # first time only
 ./.venv/bin/pytest tests/ -v
 ```
+
+CI runs the same test suite on Python 3.10–3.13 via [`.github/workflows/test.yml`](.github/workflows/test.yml) on every push and pull request to `main`.
 
 To smoke-test the hook in isolation:
 
