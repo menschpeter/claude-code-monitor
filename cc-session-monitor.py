@@ -59,6 +59,17 @@ except ImportError:
     )
     sys.exit(1)
 
+from cc_history import (
+    DailyRecord,
+    DailySessionEntry,
+    HistoryLogger,
+    UsageSample,
+    parse_ts as _parse_ts,
+    extract_usage as _extract_usage,
+    merge_sample as _merge_sample,
+    humanize_project as _humanize_project,
+)
+
 
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 SNAPSHOT_DIR = Path.home() / ".claude" / "session-monitor" / "snapshots"
@@ -70,25 +81,6 @@ VELOCITY_WINDOW_SECONDS = 30            # default rolling velocity window
 # ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
-
-@dataclass
-class UsageSample:
-    """A single deduplicated usage observation tied to a requestId."""
-    ts: float                       # unix seconds
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cache_creation: int = 0
-    cache_read: int = 0
-
-    @property
-    def total(self) -> int:
-        return (
-            self.input_tokens
-            + self.output_tokens
-            + self.cache_creation
-            + self.cache_read
-        )
-
 
 @dataclass
 class SessionState:
@@ -176,64 +168,6 @@ class SessionState:
         """Latest signal of activity — from JSONL or from the hook snapshot."""
         candidates = [t for t in (self.last_ts, self.hook_ts) if t is not None]
         return max(candidates) if candidates else None
-
-
-# ---------------------------------------------------------------------------
-# JSONL parsing — tolerate Claude Code's placeholder / duplicate streaming
-# ---------------------------------------------------------------------------
-
-def _parse_ts(raw: str | None) -> float | None:
-    if not raw:
-        return None
-    try:
-        # JSONL timestamps are ISO-8601 with trailing Z
-        if raw.endswith("Z"):
-            raw = raw[:-1] + "+00:00"
-        return datetime.fromisoformat(raw).timestamp()
-    except ValueError:
-        return None
-
-
-def _extract_usage(entry: dict) -> tuple[str | None, UsageSample | None]:
-    """Pull (requestId, UsageSample) out of one JSONL line, or (None, None)."""
-    if entry.get("type") != "assistant":
-        return None, None
-
-    msg = entry.get("message") or {}
-    usage = msg.get("usage") or {}
-    if not usage:
-        return None, None
-
-    req_id = (
-        entry.get("requestId")
-        or msg.get("id")
-        or msg.get("request_id")
-    )
-    ts = _parse_ts(entry.get("timestamp"))
-    if ts is None:
-        return None, None
-
-    return req_id, UsageSample(
-        ts=ts,
-        input_tokens=int(usage.get("input_tokens") or 0),
-        output_tokens=int(usage.get("output_tokens") or 0),
-        cache_creation=int(usage.get("cache_creation_input_tokens") or 0),
-        cache_read=int(usage.get("cache_read_input_tokens") or 0),
-    )
-
-
-def _merge_sample(existing: UsageSample | None, new: UsageSample) -> UsageSample:
-    """MAX merge: streaming duplicates hold placeholder values, so we keep
-    the largest observation per field and the latest timestamp."""
-    if existing is None:
-        return new
-    return UsageSample(
-        ts=max(existing.ts, new.ts),
-        input_tokens=max(existing.input_tokens, new.input_tokens),
-        output_tokens=max(existing.output_tokens, new.output_tokens),
-        cache_creation=max(existing.cache_creation, new.cache_creation),
-        cache_read=max(existing.cache_read, new.cache_read),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -438,19 +372,40 @@ class Monitor:
             reverse=True,
         )
 
+    def entries_for_today(self, today, now: float) -> dict[str, DailySessionEntry]:
+        """Build a {session_id: DailySessionEntry} map for live history logging.
+
+        Includes only sessions with at least one usage sample whose local
+        calendar date == `today`. Token fields are summed across samples
+        within that day only; cost_usd is taken from hook_cost_usd (cumulative
+        across session lifetime, the best we have for an open session).
+        """
+        from datetime import datetime
+        out: dict[str, DailySessionEntry] = {}
+        for state in self.sessions.values():
+            today_samples = [
+                s for s in state.samples.values()
+                if datetime.fromtimestamp(s.ts).date() == today
+            ]
+            if not today_samples:
+                continue
+            out[state.session_id] = DailySessionEntry(
+                project=state.project,
+                model=state.hook_model,
+                first_ts=min(s.ts for s in today_samples),
+                last_ts=max(s.ts for s in today_samples),
+                input_tokens=sum(s.input_tokens for s in today_samples),
+                output_tokens=sum(s.output_tokens for s in today_samples),
+                cache_read_tokens=sum(s.cache_read for s in today_samples),
+                cache_creation_tokens=sum(s.cache_creation for s in today_samples),
+                cost_usd=state.hook_cost_usd,
+            )
+        return out
+
 
 # ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------
-
-def _humanize_project(encoded: str) -> str:
-    """Claude Code encodes project paths as directory names like
-    '-Users-peter-code-myproj' — turn that into 'myproj'."""
-    if encoded.startswith("-"):
-        encoded = encoded[1:]
-    parts = encoded.split("-")
-    return parts[-1] if parts else encoded
-
 
 def _fmt_tokens(n: int) -> str:
     if n >= 1_000_000:
@@ -741,6 +696,16 @@ def main() -> int:
         "--install-hook", action="store_true",
         help="install the statusLine hook into ~/.claude/ and exit",
     )
+    ap.add_argument(
+        "--no-log", action="store_true",
+        help="disable persistent daily history logging",
+    )
+    ap.add_argument(
+        "--history-dir", type=Path,
+        default=Path.home() / ".claude" / "session-monitor" / "history",
+        help="where to write daily/monthly history files "
+             "(default: ~/.claude/session-monitor/history)",
+    )
     args = ap.parse_args()
 
     if args.install_hook:
@@ -760,6 +725,41 @@ def main() -> int:
     )
     console = Console()
 
+    logger = HistoryLogger(
+        history_dir=args.history_dir,
+        enabled=not args.no_log,
+    )
+
+    from datetime import date as _date_cls
+    if logger.enabled:
+        today = _date_cls.today()
+        logger.run_retention(today=today)
+        logger.reconstruct_missing_days(
+            today=today, projects_dir=args.projects_dir,
+        )
+
+    last_log_write = 0.0
+    LOG_INTERVAL = 60.0
+
+    def _final_log_write():
+        if not logger.enabled:
+            return
+        try:
+            monitor.refresh()
+            today = _date_cls.today()
+            entries = monitor.entries_for_today(today, time.time())
+            logger.write_today(
+                date=today.isoformat(),
+                entries=entries,
+                now_ts=time.time(),
+            )
+        except Exception:
+            # Exiting — never raise from a shutdown hook.
+            pass
+
+    import atexit
+    atexit.register(_final_log_write)
+
     try:
         with Live(
             build_layout(monitor, args.velocity_window),
@@ -770,6 +770,20 @@ def main() -> int:
             while True:
                 monitor.refresh()
                 live.update(build_layout(monitor, args.velocity_window))
+
+                now = time.time()
+                if logger.enabled and (now - last_log_write) >= LOG_INTERVAL:
+                    today = _date_cls.today()
+                    # Cheap retention check in case the monitor spans midnight.
+                    logger.run_retention(today=today)
+                    entries = monitor.entries_for_today(today, now)
+                    logger.write_today(
+                        date=today.isoformat(),
+                        entries=entries,
+                        now_ts=now,
+                    )
+                    last_log_write = now
+
                 time.sleep(args.refresh)
     except KeyboardInterrupt:
         return 0
