@@ -98,3 +98,106 @@ def test_write_today_disabled_is_noop(tmp_path):
     logger = HistoryLogger(history_dir=tmp_path, enabled=False)
     logger.write_today(date="2026-04-23", entries={}, now_ts=0.0)
     assert not (tmp_path / "daily").exists()
+
+
+from datetime import date as date_cls
+
+
+def _write_daily_fixture(
+    daily_dir: Path,
+    date_str: str,
+    sessions: dict[str, DailySessionEntry] | None = None,
+) -> None:
+    daily_dir.mkdir(parents=True, exist_ok=True)
+    rec = DailyRecord(
+        date=date_str,
+        reconstructed=False,
+        generated_at=0.0,
+        sessions=sessions or {},
+    )
+    (daily_dir / f"{date_str}.json").write_text(json.dumps(rec.to_dict()))
+
+
+def test_retention_rolls_old_daily_into_monthly(tmp_path):
+    daily_dir = tmp_path / "daily"
+    # today = 2026-04-23, so keep 04-21, 04-22, 04-23. Roll older.
+    _write_daily_fixture(daily_dir, "2026-04-18")
+    _write_daily_fixture(daily_dir, "2026-04-19")
+    _write_daily_fixture(daily_dir, "2026-04-20")   # boundary: should roll
+    _write_daily_fixture(daily_dir, "2026-04-21")
+    _write_daily_fixture(daily_dir, "2026-04-22")
+    _write_daily_fixture(daily_dir, "2026-04-23")
+
+    logger = HistoryLogger(history_dir=tmp_path, enabled=True)
+    logger.run_retention(today=date_cls(2026, 4, 23))
+
+    # Kept
+    assert (daily_dir / "2026-04-21.json").exists()
+    assert (daily_dir / "2026-04-22.json").exists()
+    assert (daily_dir / "2026-04-23.json").exists()
+    # Rolled + removed
+    assert not (daily_dir / "2026-04-18.json").exists()
+    assert not (daily_dir / "2026-04-19.json").exists()
+    assert not (daily_dir / "2026-04-20.json").exists()
+
+    monthly_file = tmp_path / "monthly" / "2026-04.jsonl"
+    assert monthly_file.exists()
+    lines = [json.loads(l) for l in monthly_file.read_text().splitlines() if l.strip()]
+    assert [l["date"] for l in lines] == ["2026-04-18", "2026-04-19", "2026-04-20"]
+    # monthly lines drop generated_at
+    assert "generated_at" not in lines[0]
+
+
+def test_retention_across_month_boundary(tmp_path):
+    daily_dir = tmp_path / "daily"
+    # today = 2026-05-02 → keep 04-30, 05-01, 05-02. Roll 04-25, 04-26.
+    _write_daily_fixture(daily_dir, "2026-04-25")
+    _write_daily_fixture(daily_dir, "2026-04-26")
+    _write_daily_fixture(daily_dir, "2026-04-30")
+    _write_daily_fixture(daily_dir, "2026-05-01")
+    _write_daily_fixture(daily_dir, "2026-05-02")
+
+    logger = HistoryLogger(history_dir=tmp_path, enabled=True)
+    logger.run_retention(today=date_cls(2026, 5, 2))
+
+    apr_file = tmp_path / "monthly" / "2026-04.jsonl"
+    assert apr_file.exists()
+    dates = [json.loads(l)["date"] for l in apr_file.read_text().splitlines() if l.strip()]
+    assert dates == ["2026-04-25", "2026-04-26"]
+    # 2026-04-30 stayed as daily (within keep window)
+    assert (daily_dir / "2026-04-30.json").exists()
+
+
+def test_retention_is_idempotent(tmp_path):
+    daily_dir = tmp_path / "daily"
+    _write_daily_fixture(daily_dir, "2026-04-18")
+    _write_daily_fixture(daily_dir, "2026-04-23")
+    logger = HistoryLogger(history_dir=tmp_path, enabled=True)
+    logger.run_retention(today=date_cls(2026, 4, 23))
+    logger.run_retention(today=date_cls(2026, 4, 23))  # second run no-op
+    monthly_file = tmp_path / "monthly" / "2026-04.jsonl"
+    dates = [json.loads(l)["date"] for l in monthly_file.read_text().splitlines() if l.strip()]
+    assert dates == ["2026-04-18"]   # not duplicated
+
+
+def test_retention_keeps_at_most_12_monthly_files(tmp_path):
+    monthly_dir = tmp_path / "monthly"
+    monthly_dir.mkdir(parents=True)
+    # 14 months of files — expect the oldest 2 to be deleted.
+    for y, m in [
+        (2025, 1), (2025, 2), (2025, 3), (2025, 4),
+        (2025, 5), (2025, 6), (2025, 7), (2025, 8),
+        (2025, 9), (2025, 10), (2025, 11), (2025, 12),
+        (2026, 1), (2026, 2),
+    ]:
+        (monthly_dir / f"{y:04d}-{m:02d}.jsonl").write_text("{}\n")
+
+    logger = HistoryLogger(history_dir=tmp_path, enabled=True)
+    logger.run_retention(today=date_cls(2026, 3, 1))
+
+    remaining = sorted(p.name for p in monthly_dir.glob("*.jsonl"))
+    assert len(remaining) == 12
+    assert "2025-01.jsonl" not in remaining
+    assert "2025-02.jsonl" not in remaining
+    assert "2025-03.jsonl" in remaining
+    assert "2026-02.jsonl" in remaining

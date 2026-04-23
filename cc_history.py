@@ -148,3 +148,72 @@ class HistoryLogger:
         tmp = target.with_name(f".{target.name}.tmp.{os.getpid()}")
         tmp.write_text(json.dumps(payload, indent=2, sort_keys=True))
         tmp.replace(target)
+
+    # -- retention ------------------------------------------------------
+
+    # Keep today + previous 2 calendar days as standalone daily files.
+    DAILY_KEEP_DAYS = 3
+    MONTHLY_KEEP_COUNT = 12
+
+    def run_retention(self, today) -> None:
+        """Roll old daily JSONs into monthly JSONLs; dedup append.
+
+        `today` is a datetime.date (local). Files whose date ≤
+        today - DAILY_KEEP_DAYS are appended to their month's JSONL
+        and then deleted. Monthly rollup is dedup-safe: an already-rolled
+        date is not appended twice. After the daily-roll step, prunes
+        monthly/ down to MONTHLY_KEEP_COUNT most recent files.
+        """
+        if not self.enabled:
+            return
+
+        from datetime import date as date_cls, timedelta
+
+        if self.daily_dir.exists():
+            cutoff = today - timedelta(days=self.DAILY_KEEP_DAYS - 1)
+            # cutoff is the OLDEST day still kept. Roll anything < cutoff.
+
+            for daily_file in sorted(self.daily_dir.glob("*.json")):
+                try:
+                    file_date = date_cls.fromisoformat(daily_file.stem)
+                except ValueError:
+                    continue  # ignore unrelated files
+                if file_date >= cutoff:
+                    continue
+
+                try:
+                    payload = json.loads(daily_file.read_text())
+                except (OSError, json.JSONDecodeError):
+                    continue
+
+                self._append_to_monthly(file_date, payload)
+                daily_file.unlink(missing_ok=True)
+
+        # Prune monthly/ to the MONTHLY_KEEP_COUNT most recent.
+        if self.monthly_dir.exists():
+            monthlies = sorted(self.monthly_dir.glob("*.jsonl"))
+            excess = len(monthlies) - self.MONTHLY_KEEP_COUNT
+            if excess > 0:
+                for old in monthlies[:excess]:
+                    old.unlink(missing_ok=True)
+
+    def _append_to_monthly(self, file_date, payload: dict[str, Any]) -> None:
+        self.monthly_dir.mkdir(parents=True, exist_ok=True)
+        monthly = self.monthly_dir / f"{file_date.strftime('%Y-%m')}.jsonl"
+
+        # Dedup: skip if this date is already present in the file.
+        if monthly.exists():
+            for line in monthly.read_text().splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    existing = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if existing.get("date") == payload.get("date"):
+                    return  # already rolled
+
+        payload = dict(payload)
+        payload.pop("generated_at", None)  # monthly lines drop it
+        with monthly.open("a") as f:
+            f.write(json.dumps(payload, sort_keys=True) + "\n")
