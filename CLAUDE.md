@@ -38,6 +38,8 @@ There is no build step, no lint config, and no test suite. The project is two st
 
 **Dedup strategy.** `_merge_sample` does a per-field MAX merge keyed by `requestId` (fallback: message id, then `ts:<timestamp>`). Streaming duplicates are normal — never sum raw JSONL entries; always merge-then-sum.
 
+**`t/s` vs `$/h` are orthogonal.** `velocity()` sums all token types equally — cache-reads count as much as output tokens even though they cost ~100× less. That means a red `t/s` often coincides with a green `$/h` (cache is working). Don't "simplify" `$/h` by deriving it from `t/s` × a price constant; the tool has no price table and must not grow one (see the README's "Why this exists" section). `cost_velocity()` is the only cost-rate computation and it operates on the hook's `total_cost_usd` directly.
+
 **Tail-only reads.** `Monitor.refresh` remembers the last `file_size` per JSONL and seeks to that offset; if the file shrank (edit / rotate) it resets in-memory state and re-reads from 0. A trailing non-newline-terminated chunk is skipped to avoid parsing a mid-write line.
 
 **Hook performance constraints** (from the Claude Code docs, reproduced in the hook header): the script runs on every turn, is throttled to 300 ms, and a newer turn *kills* an in-flight run. So the hook must stay fast: no network calls, `set -u` but deliberately NOT `set -e` (a broken snapshot must never blank the status bar), and the snapshot is always written to a temp file then renamed. `jq` missing is handled gracefully — the raw payload is dumped to `_last-raw.json` and a minimal status line is printed.

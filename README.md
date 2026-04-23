@@ -93,6 +93,82 @@ python cc-session-monitor.py [OPTIONS]
 python cc-session-monitor.py --refresh 0.5 --velocity-window 10
 ```
 
+## Reading the TUI
+
+### Columns
+
+| Column | What it shows | Source |
+|---|---|---|
+| **Session** | First 8 chars of the session UUID, prefixed with a status marker | JSONL filename |
+| **Project** | Project folder name (e.g. `-Users-peter-code-foo` → `foo`) | Directory name |
+| **Age** | Time since last activity (`45s`, `3m12s`, `1h05m`) | Latest of JSONL / hook |
+| **Input** | Cumulative input tokens since session start | Hook (accurate) or JSONL (approx) |
+| **Output** | Cumulative output tokens since session start | Hook (accurate) or JSONL (approx) |
+| **Cache R** | Cache-read tokens (the cheap, reused kind) | JSONL (reliable) |
+| **Total** | `Input + Output + Cache-Read + Cache-Create` | Computed |
+| **t/s** | Token throughput over the velocity window | Computed from JSONL |
+| **Cost** | Cumulative USD since session start | Hook |
+| **$/h** | Cost rate extrapolated to one hour, over the velocity window | Computed from hook snapshots |
+
+A **TOTAL** footer row sums all sessions currently visible in that panel.
+
+### Session marker
+
+- **`●` green** — hook is installed for this session; `Cost` and context tokens are **accurate**.
+- **`○` yellow** — JSONL-only fallback; `Input` / `Output` are **streaming placeholders** (underestimate real billed tokens). Install the hook to fix this.
+
+### `t/s` colors — throughput, NOT cost
+
+`t/s` sums **all** token types equally (input + output + cache-read + cache-create). Because cache-read tokens are cheap but can flow at very high rates, a red `t/s` does *not* mean "expensive" — it means "lots of tokens per second".
+
+| Color | Range | Typical cause |
+|---|---|---|
+| dim "idle" | 0 t/s | no activity |
+| green | `< 100 t/s` | normal interaction |
+| bold yellow | `100–999 t/s` | heavy tool output, big file reads |
+| bold red | `≥ 1000 t/s` (shown as `X.XK t/s`) | very high throughput — often cache-reads or a streaming agent |
+
+### `$/h` colors — actual cost velocity
+
+This is the one that reflects money leaving your wallet (or would, on API billing).
+
+| Color | Range |
+|---|---|
+| dim `—` | no hook data, or idle |
+| green | `< $1/h` |
+| yellow | `$1–$5/h` |
+| bold red | `≥ $5/h` |
+
+### Reading `t/s` and `$/h` together
+
+The combination is where the useful signal lives:
+
+| `t/s` | `$/h` | Interpretation |
+|---|---|---|
+| red | green | **Cache working well** — high volume, low cost. Ideal. |
+| green | red | **Short but expensive turns** — usually Opus reasoning without cache hits. |
+| red | red | **Heavy Opus work without cache** — the real cost-burner. |
+| green | green | Quiet. |
+
+### Status-bar colors (Claude Code itself, not the TUI)
+
+The hook prints a colored one-liner into Claude Code's status bar. The context-percentage segment is color-coded:
+
+- **green** `< 50 %` — plenty of headroom
+- **yellow** `50–79 %` — keep an eye on it
+- **red** `≥ 80 %` — compaction / context limit approaching
+
+### Panel and accent colors
+
+- **Green panel border** — the "Active" (last 5 min) view.
+- **Blue panel border** — the "Billing" (rolling 5 h) view.
+- **Magenta** — project name column.
+- **Cyan** — table headers and the folder name in the status bar.
+- **Dim** — `Cache R` column and separators, deliberately de-emphasized because cache reads are cheap and plentiful.
+- The **TOTAL** footer highlights the summed token count on dark-cyan and, if non-zero, the summed cost on green.
+
+Thresholds for the velocity colors are hard-coded in `_fmt_velocity` (cc-session-monitor.py:473) and the `$/h` block of `build_table` (cc-session-monitor.py:550). Tweak them there if your usage pattern makes the defaults feel off.
+
 ## How it works
 
 ```
