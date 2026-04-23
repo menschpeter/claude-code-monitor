@@ -41,21 +41,21 @@ Rows in the TUI are marked `●` (hook-backed, accurate cost + tokens) or `○` 
 
 ```bash
 # 1. Install Python deps
-pip install -r requirements.txt
+python3 -m pip install -r requirements.txt
 
 # 2. Install the statusLine hook into ~/.claude/ and patch settings.json
-python cc-session-monitor.py --install-hook
+python3 cc-session-monitor.py --install-hook
 
 # 3. Restart any running Claude Code sessions so the hook picks up
 
 # 4. In a second terminal, launch the monitor
-python cc-session-monitor.py
+python3 cc-session-monitor.py
 ```
 
 A convenience wrapper is included:
 
 ```bash
-./run-monitor.sh                 # starts the monitor via the local .venv
+./run-monitor.sh                 # uses ./.venv/bin/python if present, else python3
 ./run-monitor.sh --install-hook  # install the hook
 ```
 
@@ -208,7 +208,7 @@ The monitor persists a JSON snapshot per calendar day to `~/.claude/session-moni
 
 ### Reconstruction
 
-If the monitor was not running yesterday or the day before, those daily files are reconstructed from Claude Code's JSONL transcripts on the next startup. Reconstructed files have `"reconstructed": true` and `"cost_usd": null` on every session, because the cumulative cost snapshot in the hook's data cannot be reliably attributed to one specific day after the fact. Token counts are still accurate (modulo the known JSONL placeholder issue).
+If the monitor was not running yesterday or the day before, those daily files are reconstructed from Claude Code's JSONL transcripts on the next startup. Reconstructed files have `"reconstructed": true` and `"session_cumulative_cost_usd": null` on every session, because the cumulative cost snapshot in the hook's data cannot be reliably attributed to one specific day after the fact. Token counts are still accurate (modulo the known JSONL placeholder issue).
 
 ### CLI
 
@@ -236,14 +236,19 @@ Daily JSON (and one JSONL line in the monthly file, minus `generated_at`):
       "output_tokens": 6789,
       "cache_read_tokens": 98765,
       "cache_creation_tokens": 4321,
-      "cost_usd": 2.34
+      "session_cumulative_cost_usd": 2.34
     }
   },
-  "totals": { "sessions": 1, "input_tokens": 12345, "...": "same fields summed" }
+  "totals": {
+    "sessions": 1,
+    "input_tokens": 12345,
+    "...": "same fields summed",
+    "session_cumulative_cost_usd": 2.34
+  }
 }
 ```
 
-`sessions` is keyed by session UUID so external tools can join/diff across days. Token counts are the sum of usage samples whose timestamps fell within that local calendar date — not cumulative session totals. `cost_usd` is taken from the hook's cumulative `total_cost_usd` at the most recent tick of that day; for reconstructed files it is `null`.
+`sessions` is keyed by session UUID so external tools can join/diff across days. Token counts are the sum of usage samples whose timestamps fell within that local calendar date — not cumulative session totals. `session_cumulative_cost_usd` is the session lifetime cumulative `total_cost_usd` seen at the most recent tick of that day, not spend attributable to that day alone; summing it across dates will double-count multi-day sessions. For reconstructed files it is `null`.
 
 ## Known limitations
 
@@ -258,7 +263,7 @@ Daily JSON (and one JSONL line in the monthly file, minus `generated_at`):
 ├── cc-session-monitor.py   # the TUI
 ├── cc_history.py           # persistent per-day logger + retention + reconstruction
 ├── cc-monitor-hook.sh      # the statusLine hook
-├── run-monitor.sh          # convenience wrapper (uses ./.venv)
+├── run-monitor.sh          # convenience wrapper (.venv first, then python3)
 ├── tests/                  # pytest unit tests for cc_history
 └── CLAUDE.md               # guidance for Claude Code working in this repo
 ```
