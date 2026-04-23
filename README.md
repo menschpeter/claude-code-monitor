@@ -1,11 +1,14 @@
-# cc-session-monitor
+# claude-code-monitor
 
 A live terminal UI for tracking [Claude Code](https://claude.com/claude-code) token usage, cost, and velocity across all your active sessions — plus a `statusLine` hook that upgrades Claude Code's own status bar with accurate cost and context-window info.
 
-Two components work together:
+The scripts inside use a short `cc-` prefix (short for "Claude Code") for internal consistency — the repo name spells it out for discoverability.
+
+Three components work together:
 
 - **`cc-monitor-hook.sh`** — a `statusLine` hook that runs on every message turn. It renders a compact colored status line *and* drops a per-session snapshot JSON to disk.
 - **`cc-session-monitor.py`** — a [`rich`](https://github.com/Textualize/rich)-based TUI that reads those snapshots plus Claude Code's JSONL transcripts and shows live per-session tables.
+- **`cc_history.py`** — persistent per-day history: one JSON file per calendar day, rolled into monthly JSONL files with bounded retention.
 
 ## Why this exists
 
@@ -256,7 +259,6 @@ Daily JSON (and one JSONL line in the monthly file, minus `generated_at`):
 ├── cc_history.py           # persistent per-day logger + retention + reconstruction
 ├── cc-monitor-hook.sh      # the statusLine hook
 ├── run-monitor.sh          # convenience wrapper (uses ./.venv)
-├── install_cc-monitor.md   # short install note (DE)
 ├── tests/                  # pytest unit tests for cc_history
 └── CLAUDE.md               # guidance for Claude Code working in this repo
 ```

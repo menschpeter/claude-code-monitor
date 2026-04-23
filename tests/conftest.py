@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for cc-session-monitor tests."""
+"""Shared pytest fixtures for claude-code-monitor tests."""
 from __future__ import annotations
 
 import sys

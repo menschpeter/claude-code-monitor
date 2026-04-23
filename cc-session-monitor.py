@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 cc-session-monitor — live Terminal UI for tracking Claude Code token usage
-per active session, with token/s velocity.
+per active session, with token/s velocity. Part of the claude-code-monitor
+project.
 
 Reads Claude Code's JSONL transcripts under ~/.claude/projects/<project>/*.jsonl
 and renders two side-by-side panels:
@@ -576,7 +577,7 @@ def build_layout(
     )
 
     header = Text.assemble(
-        ("cc-session-monitor", "bold white"),
+        ("claude-code-monitor", "bold white"),
         ("   │   ", "dim"),
         (f"refresh {time.strftime('%H:%M:%S')}", "cyan"),
         ("   │   ", "dim"),

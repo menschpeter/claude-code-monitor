@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# cc-monitor-hook — Claude Code statusLine hook
+# cc-monitor-hook — Claude Code statusLine hook, part of claude-code-monitor
 #
 # Does two jobs on every status update:
 #   1. Writes a session snapshot JSON to ~/.claude/session-monitor/snapshots/

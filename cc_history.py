@@ -1,5 +1,5 @@
 """
-cc_history — on-disk daily/monthly history for cc-session-monitor.
+cc_history — on-disk daily/monthly history for the claude-code-monitor project.
 
 Writes one JSON file per calendar day under ~/.claude/session-monitor/history/daily/,
 rolls days older than two days ago into monthly JSONL files, and keeps at
