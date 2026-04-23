@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
-from cc_history import DailyRecord, DailySessionEntry
+from cc_history import DailyRecord, DailySessionEntry, HistoryLogger
 
 
 def test_daily_record_round_trip():
@@ -64,3 +65,36 @@ def test_totals_cost_null_if_any_session_null():
         },
     )
     assert rec.to_dict()["totals"]["cost_usd"] is None
+
+
+def test_write_today_creates_atomic_daily_file(tmp_path):
+    logger = HistoryLogger(history_dir=tmp_path, enabled=True)
+    entries = {
+        "sess-1": DailySessionEntry(
+            project="foo", model="Opus",
+            first_ts=1745382000.0, last_ts=1745400000.0,
+            input_tokens=100, output_tokens=50,
+            cache_read_tokens=500, cache_creation_tokens=10,
+            cost_usd=1.23,
+        ),
+    }
+    logger.write_today(
+        date="2026-04-23",
+        entries=entries,
+        now_ts=1745403600.0,
+    )
+    daily_file = tmp_path / "daily" / "2026-04-23.json"
+    assert daily_file.exists()
+    data = json.loads(daily_file.read_text())
+    assert data["date"] == "2026-04-23"
+    assert data["reconstructed"] is False
+    assert "sess-1" in data["sessions"]
+    assert data["totals"]["input_tokens"] == 100
+    # no leftover tmp files
+    assert not list((tmp_path / "daily").glob(".*.tmp*"))
+
+
+def test_write_today_disabled_is_noop(tmp_path):
+    logger = HistoryLogger(history_dir=tmp_path, enabled=False)
+    logger.write_today(date="2026-04-23", entries={}, now_ts=0.0)
+    assert not (tmp_path / "daily").exists()

@@ -97,3 +97,54 @@ class DailyRecord:
                 for sid, entry in (d.get("sessions") or {}).items()
             },
         )
+
+
+class HistoryLogger:
+    """
+    Writes per-day JSON snapshots of session usage to `history/daily/`
+    and rolls old days into `history/monthly/`. See module docstring.
+
+    Atomic writes: every file goes via `<name>.tmp.<pid>` + rename, so a
+    crash mid-write never leaves a half-written daily file in place.
+    """
+
+    def __init__(self, history_dir: Path, enabled: bool = True) -> None:
+        self.history_dir = Path(history_dir)
+        self.enabled = enabled
+        self.daily_dir = self.history_dir / "daily"
+        self.monthly_dir = self.history_dir / "monthly"
+
+    # -- write path -----------------------------------------------------
+
+    def write_today(
+        self,
+        date: str,
+        entries: dict[str, DailySessionEntry],
+        now_ts: float,
+    ) -> None:
+        """Serialize a DailyRecord for `date` and write it atomically.
+
+        Called both periodically and at shutdown. Safe to call when
+        `enabled` is False — becomes a no-op.
+        """
+        if not self.enabled:
+            return
+        self.daily_dir.mkdir(parents=True, exist_ok=True)
+
+        rec = DailyRecord(
+            date=date,
+            reconstructed=False,
+            generated_at=now_ts,
+            sessions=entries,
+        )
+        target = self.daily_dir / f"{date}.json"
+        self._atomic_write_json(target, rec.to_dict())
+
+    # -- helpers --------------------------------------------------------
+
+    @staticmethod
+    def _atomic_write_json(target: Path, payload: dict[str, Any]) -> None:
+        import os
+        tmp = target.with_name(f".{target.name}.tmp.{os.getpid()}")
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True))
+        tmp.replace(target)
