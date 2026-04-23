@@ -35,13 +35,14 @@ Requires: rich  (pip install rich)
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import os
 import sys
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 from typing import Iterable
 
@@ -372,32 +373,36 @@ class Monitor:
             reverse=True,
         )
 
-    def entries_for_today(self, today, now: float) -> dict[str, DailySessionEntry]:
-        """Build a {session_id: DailySessionEntry} map for live history logging.
+    def entries_for_date(self, target_date, now: float) -> dict[str, DailySessionEntry]:
+        """Build a {session_id: DailySessionEntry} map for history logging.
 
         Includes only sessions with at least one usage sample whose local
-        calendar date == `today`. Token fields are summed across samples
-        within that day only; cost_usd is taken from hook_cost_usd (cumulative
-        across session lifetime, the best we have for an open session).
+        calendar date == `target_date`. Token fields are summed across
+        samples within that day only.
+
+        Caveat on cost_usd: taken from hook_cost_usd which is cumulative
+        across the session's lifetime. When a session spans multiple days,
+        each day's file records the same cumulative figure — aggregators
+        that sum cost_usd across multiple daily files will double-count.
+        See README "History" section.
         """
-        from datetime import datetime
         out: dict[str, DailySessionEntry] = {}
         for state in self.sessions.values():
-            today_samples = [
+            day_samples = [
                 s for s in state.samples.values()
-                if datetime.fromtimestamp(s.ts).date() == today
+                if datetime.fromtimestamp(s.ts).date() == target_date
             ]
-            if not today_samples:
+            if not day_samples:
                 continue
             out[state.session_id] = DailySessionEntry(
                 project=state.project,
                 model=state.hook_model,
-                first_ts=min(s.ts for s in today_samples),
-                last_ts=max(s.ts for s in today_samples),
-                input_tokens=sum(s.input_tokens for s in today_samples),
-                output_tokens=sum(s.output_tokens for s in today_samples),
-                cache_read_tokens=sum(s.cache_read for s in today_samples),
-                cache_creation_tokens=sum(s.cache_creation for s in today_samples),
+                first_ts=min(s.ts for s in day_samples),
+                last_ts=max(s.ts for s in day_samples),
+                input_tokens=sum(s.input_tokens for s in day_samples),
+                output_tokens=sum(s.output_tokens for s in day_samples),
+                cache_read_tokens=sum(s.cache_read for s in day_samples),
+                cache_creation_tokens=sum(s.cache_creation for s in day_samples),
                 cost_usd=state.hook_cost_usd,
             )
         return out
@@ -730,24 +735,32 @@ def main() -> int:
         enabled=not args.no_log,
     )
 
-    from datetime import date as _date_cls
     if logger.enabled:
-        today = _date_cls.today()
-        logger.run_retention(today=today)
+        startup_today = date.today()
+        logger.run_retention(today=startup_today)
         logger.reconstruct_missing_days(
-            today=today, projects_dir=args.projects_dir,
+            today=startup_today, projects_dir=args.projects_dir,
         )
 
     last_log_write = 0.0
+    last_log_date: date | None = None
     LOG_INTERVAL = 60.0
 
     def _final_log_write():
         if not logger.enabled:
             return
         try:
-            monitor.refresh()
-            today = _date_cls.today()
-            entries = monitor.entries_for_today(today, time.time())
+            today = date.today()
+            # If we crossed midnight since the last tick, flush yesterday
+            # one more time so its last ~60s of activity isn't lost.
+            if last_log_date is not None and last_log_date != today:
+                yesterday_entries = monitor.entries_for_date(last_log_date, time.time())
+                logger.write_today(
+                    date=last_log_date.isoformat(),
+                    entries=yesterday_entries,
+                    now_ts=time.time(),
+                )
+            entries = monitor.entries_for_date(today, time.time())
             logger.write_today(
                 date=today.isoformat(),
                 entries=entries,
@@ -757,7 +770,6 @@ def main() -> int:
             # Exiting — never raise from a shutdown hook.
             pass
 
-    import atexit
     atexit.register(_final_log_write)
 
     try:
@@ -773,16 +785,28 @@ def main() -> int:
 
                 now = time.time()
                 if logger.enabled and (now - last_log_write) >= LOG_INTERVAL:
-                    today = _date_cls.today()
+                    today = date.today()
+                    # Midnight rollover: flush yesterday one final time
+                    # with the last samples we observed before the date
+                    # changed, so nothing between the last tick and 00:00
+                    # goes missing.
+                    if last_log_date is not None and last_log_date != today:
+                        yesterday_entries = monitor.entries_for_date(last_log_date, now)
+                        logger.write_today(
+                            date=last_log_date.isoformat(),
+                            entries=yesterday_entries,
+                            now_ts=now,
+                        )
                     # Cheap retention check in case the monitor spans midnight.
                     logger.run_retention(today=today)
-                    entries = monitor.entries_for_today(today, now)
+                    entries = monitor.entries_for_date(today, now)
                     logger.write_today(
                         date=today.isoformat(),
                         entries=entries,
                         now_ts=now,
                     )
                     last_log_write = now
+                    last_log_date = today
 
                 time.sleep(args.refresh)
     except KeyboardInterrupt:

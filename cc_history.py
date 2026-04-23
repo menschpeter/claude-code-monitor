@@ -13,11 +13,11 @@ transcripts and writes reconstructed=true files with cost_usd=null.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
-
-from datetime import datetime as _datetime
 
 
 @dataclass
@@ -43,7 +43,7 @@ def parse_ts(raw: str | None) -> float | None:
     try:
         if raw.endswith("Z"):
             raw = raw[:-1] + "+00:00"
-        return _datetime.fromisoformat(raw).timestamp()
+        return datetime.fromisoformat(raw).timestamp()
     except ValueError:
         return None
 
@@ -221,7 +221,6 @@ class HistoryLogger:
 
     @staticmethod
     def _atomic_write_json(target: Path, payload: dict[str, Any]) -> None:
-        import os
         tmp = target.with_name(f".{target.name}.tmp.{os.getpid()}")
         tmp.write_text(json.dumps(payload, indent=2, sort_keys=True))
         tmp.replace(target)
@@ -244,15 +243,13 @@ class HistoryLogger:
         if not self.enabled:
             return
 
-        from datetime import date as date_cls, timedelta
-
         if self.daily_dir.exists():
             cutoff = today - timedelta(days=self.DAILY_KEEP_DAYS - 1)
             # cutoff is the OLDEST day still kept. Roll anything < cutoff.
 
             for daily_file in sorted(self.daily_dir.glob("*.json")):
                 try:
-                    file_date = date_cls.fromisoformat(daily_file.stem)
+                    file_date = date.fromisoformat(daily_file.stem)
                 except ValueError:
                     continue  # ignore unrelated files
                 if file_date >= cutoff:
@@ -309,15 +306,11 @@ class HistoryLogger:
         if not self.enabled or not projects_dir.exists():
             return
 
-        from datetime import date as date_cls, datetime, timedelta
-
-        self.daily_dir.mkdir(parents=True, exist_ok=True)
-
         target_dates = {
             today - timedelta(days=i)
             for i in range(self.DAILY_KEEP_DAYS)
         }
-        # Skip dates that already have a live file.
+        # Skip dates that already have a live OR previously-reconstructed file.
         missing = {
             d for d in target_dates
             if not (self.daily_dir / f"{d.isoformat()}.json").exists()
@@ -326,7 +319,7 @@ class HistoryLogger:
             return
 
         # date -> session_id -> {"project": str, "samples": dict[str, UsageSample]}
-        by_day: dict[date_cls, dict[str, dict]] = {d: {} for d in missing}
+        by_day: dict[date, dict[str, dict]] = {d: {} for d in missing}
 
         for project_dir in projects_dir.iterdir():
             if not project_dir.is_dir():
@@ -359,6 +352,11 @@ class HistoryLogger:
                             )
                 except OSError:
                     continue
+
+        if not any(by_day.values()):
+            return  # no activity on any missing day → no files, no mkdir
+
+        self.daily_dir.mkdir(parents=True, exist_ok=True)
 
         for d, sessions_map in by_day.items():
             if not sessions_map:

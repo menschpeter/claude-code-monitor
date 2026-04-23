@@ -263,7 +263,12 @@ Daily JSON (and one JSONL line in the monthly file, minus `generated_at`):
 
 ## Development
 
-There is no build step, no lint config, and no test suite. The repo is two standalone scripts.
+There is no build step and no lint config. Unit tests (pytest, covering `cc_history.py` only):
+
+```bash
+./.venv/bin/pip install pytest    # first time only
+./.venv/bin/pytest tests/ -v
+```
 
 To smoke-test the hook in isolation:
 

@@ -318,3 +318,137 @@ def test_reconstruct_does_not_overwrite_live_file(tmp_path):
     assert rec["reconstructed"] is False
     assert rec["generated_at"] == 123.0
     assert rec["sessions"] == {}
+
+
+# --- disabled-mode no-ops ---------------------------------------------------
+
+def test_run_retention_disabled_is_noop(tmp_path):
+    _write_daily_fixture(tmp_path / "daily", "2026-04-18")
+    logger = HistoryLogger(history_dir=tmp_path, enabled=False)
+    logger.run_retention(today=date_cls(2026, 4, 23))
+    # Old file untouched, no monthly dir created.
+    assert (tmp_path / "daily" / "2026-04-18.json").exists()
+    assert not (tmp_path / "monthly").exists()
+
+
+def test_reconstruct_disabled_is_noop(tmp_path):
+    projects = tmp_path / "projects"
+    _write_jsonl(
+        projects / "-proj" / "sess.jsonl",
+        [{
+            "type": "assistant", "requestId": "r1",
+            "timestamp": _iso(2026, 4, 22, 10, 0, 0),
+            "message": {"usage": {"input_tokens": 1, "output_tokens": 1}},
+        }],
+    )
+    logger = HistoryLogger(history_dir=tmp_path, enabled=False)
+    logger.reconstruct_missing_days(
+        today=date_cls(2026, 4, 23), projects_dir=projects,
+    )
+    # No history dirs should be created.
+    assert not (tmp_path / "daily").exists()
+    assert not (tmp_path / "monthly").exists()
+
+
+# --- robustness against garbage files --------------------------------------
+
+def test_retention_skips_non_iso_daily_filenames(tmp_path):
+    daily_dir = tmp_path / "daily"
+    _write_daily_fixture(daily_dir, "2026-04-18")        # should roll
+    _write_daily_fixture(daily_dir, "2026-04-23")        # kept
+    (daily_dir / "backup.json").write_text("{}")         # ignored
+    (daily_dir / "notes-2026.json").write_text("{}")     # ignored
+
+    logger = HistoryLogger(history_dir=tmp_path, enabled=True)
+    logger.run_retention(today=date_cls(2026, 4, 23))
+
+    assert (daily_dir / "backup.json").exists()          # untouched
+    assert (daily_dir / "notes-2026.json").exists()      # untouched
+    assert not (daily_dir / "2026-04-18.json").exists()  # rolled + removed
+
+
+def test_retention_skips_garbage_daily_json(tmp_path):
+    daily_dir = tmp_path / "daily"
+    daily_dir.mkdir(parents=True)
+    (daily_dir / "2026-04-18.json").write_text("not json at all {")  # corrupt
+
+    logger = HistoryLogger(history_dir=tmp_path, enabled=True)
+    # Must not raise; garbage file is left in place and nothing is rolled.
+    logger.run_retention(today=date_cls(2026, 4, 23))
+
+    assert (daily_dir / "2026-04-18.json").exists()
+    assert not (tmp_path / "monthly").exists()
+
+
+def test_reconstruct_skips_malformed_jsonl_lines(tmp_path):
+    projects = tmp_path / "projects"
+    history = tmp_path / "history"
+
+    session_uuid = "abcd0000-abcd-abcd-abcd-abcd00000001"
+    jsonl = projects / "-proj" / f"{session_uuid}.jsonl"
+    jsonl.parent.mkdir(parents=True)
+    with jsonl.open("w") as f:
+        # valid
+        f.write(json.dumps({
+            "type": "assistant", "requestId": "r1",
+            "timestamp": _iso(2026, 4, 22, 10, 0, 0),
+            "message": {"usage": {"input_tokens": 50, "output_tokens": 10}},
+        }) + "\n")
+        # garbage line mid-file
+        f.write("{this is not valid json\n")
+        # another valid
+        f.write(json.dumps({
+            "type": "assistant", "requestId": "r2",
+            "timestamp": _iso(2026, 4, 22, 11, 0, 0),
+            "message": {"usage": {"input_tokens": 20, "output_tokens": 5}},
+        }) + "\n")
+
+    logger = HistoryLogger(history_dir=history, enabled=True)
+    logger.reconstruct_missing_days(
+        today=date_cls(2026, 4, 23), projects_dir=projects,
+    )
+
+    rec = json.loads((history / "daily" / "2026-04-22.json").read_text())
+    s = rec["sessions"][session_uuid]
+    assert s["input_tokens"] == 70   # only valid entries summed
+    assert s["output_tokens"] == 15
+
+
+def test_reconstruct_skips_existing_reconstructed_file(tmp_path):
+    """A previously reconstructed file must not be overwritten either.
+
+    The gate is 'file exists', not 'file is live' — once written, a day is
+    settled. A follow-up pass won't re-scan JSONL and won't rewrite the
+    generated_at timestamp.
+    """
+    projects = tmp_path / "projects"
+    history = tmp_path / "history"
+    (history / "daily").mkdir(parents=True)
+
+    existing_reconstructed = DailyRecord(
+        date="2026-04-22", reconstructed=True, generated_at=7.0,
+        sessions={},
+    )
+    (history / "daily" / "2026-04-22.json").write_text(
+        json.dumps(existing_reconstructed.to_dict())
+    )
+
+    # Plenty of JSONL data for that day — must be ignored.
+    _write_jsonl(
+        projects / "-proj" / "abcd.jsonl",
+        [{
+            "type": "assistant", "requestId": "r1",
+            "timestamp": _iso(2026, 4, 22, 10, 0, 0),
+            "message": {"usage": {"input_tokens": 999, "output_tokens": 999}},
+        }],
+    )
+
+    logger = HistoryLogger(history_dir=history, enabled=True)
+    logger.reconstruct_missing_days(
+        today=date_cls(2026, 4, 23), projects_dir=projects,
+    )
+
+    rec = json.loads((history / "daily" / "2026-04-22.json").read_text())
+    assert rec["reconstructed"] is True
+    assert rec["generated_at"] == 7.0   # untouched
+    assert rec["sessions"] == {}
