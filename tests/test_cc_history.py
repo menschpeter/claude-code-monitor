@@ -23,7 +23,7 @@ def test_daily_record_round_trip():
                 output_tokens=50,
                 cache_read_tokens=500,
                 cache_creation_tokens=10,
-                cost_usd=1.23,
+                session_cumulative_cost_usd=1.23,
             ),
         },
     )
@@ -35,14 +35,14 @@ def test_daily_record_round_trip():
         "output_tokens": 50,
         "cache_read_tokens": 500,
         "cache_creation_tokens": 10,
-        "cost_usd": 1.23,
+        "session_cumulative_cost_usd": 1.23,
     }
     # round-trip through JSON
     restored = DailyRecord.from_dict(json.loads(json.dumps(as_dict)))
     assert restored.date == rec.date
     assert restored.reconstructed is False
     assert restored.sessions["sess-1"].input_tokens == 100
-    assert restored.sessions["sess-1"].cost_usd == 1.23
+    assert restored.sessions["sess-1"].session_cumulative_cost_usd == 1.23
 
 
 def test_totals_cost_null_if_any_session_null():
@@ -55,17 +55,17 @@ def test_totals_cost_null_if_any_session_null():
                 project="p", model=None, first_ts=0, last_ts=0,
                 input_tokens=1, output_tokens=1,
                 cache_read_tokens=0, cache_creation_tokens=0,
-                cost_usd=None,
+                session_cumulative_cost_usd=None,
             ),
             "b": DailySessionEntry(
                 project="p", model=None, first_ts=0, last_ts=0,
                 input_tokens=1, output_tokens=1,
                 cache_read_tokens=0, cache_creation_tokens=0,
-                cost_usd=0.5,
+                session_cumulative_cost_usd=0.5,
             ),
         },
     )
-    assert rec.to_dict()["totals"]["cost_usd"] is None
+    assert rec.to_dict()["totals"]["session_cumulative_cost_usd"] is None
 
 
 def test_write_today_creates_atomic_daily_file(tmp_path):
@@ -76,7 +76,7 @@ def test_write_today_creates_atomic_daily_file(tmp_path):
             first_ts=1745382000.0, last_ts=1745400000.0,
             input_tokens=100, output_tokens=50,
             cache_read_tokens=500, cache_creation_tokens=10,
-            cost_usd=1.23,
+            session_cumulative_cost_usd=1.23,
         ),
     }
     logger.write_today(
@@ -99,6 +99,31 @@ def test_write_today_disabled_is_noop(tmp_path):
     logger = HistoryLogger(history_dir=tmp_path, enabled=False)
     logger.write_today(date="2026-04-23", entries={}, now_ts=0.0)
     assert not (tmp_path / "daily").exists()
+
+
+def test_daily_record_from_dict_accepts_legacy_cost_usd():
+    restored = DailyRecord.from_dict(
+        {
+            "date": "2026-04-23",
+            "reconstructed": False,
+            "generated_at": 1745403600.0,
+            "sessions": {
+                "sess-1": {
+                    "project": "foo",
+                    "model": "Opus",
+                    "first_ts": 1745382000.0,
+                    "last_ts": 1745400000.0,
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cache_read_tokens": 500,
+                    "cache_creation_tokens": 10,
+                    "cost_usd": 1.23,
+                },
+            },
+        }
+    )
+
+    assert restored.sessions["sess-1"].session_cumulative_cost_usd == 1.23
 
 
 def _write_daily_fixture(
@@ -281,9 +306,9 @@ def test_reconstruct_missing_days_from_jsonl(tmp_path):
     assert s["output_tokens"] == 130
     assert s["cache_read_tokens"] == 600
     assert s["cache_creation_tokens"] == 10
-    assert s["cost_usd"] is None
+    assert s["session_cumulative_cost_usd"] is None
     assert s["project"] == "myproj"
-    assert rec22["totals"]["cost_usd"] is None
+    assert rec22["totals"]["session_cumulative_cost_usd"] is None
 
 
 def test_reconstruct_does_not_overwrite_live_file(tmp_path):

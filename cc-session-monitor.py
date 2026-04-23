@@ -381,11 +381,11 @@ class Monitor:
         calendar date == `target_date`. Token fields are summed across
         samples within that day only.
 
-        Caveat on cost_usd: taken from hook_cost_usd which is cumulative
-        across the session's lifetime. When a session spans multiple days,
-        each day's file records the same cumulative figure — aggregators
-        that sum cost_usd across multiple daily files will double-count.
-        See README "History" section.
+        Caveat on session_cumulative_cost_usd: taken from hook_cost_usd
+        which is cumulative across the session's lifetime. When a session
+        spans multiple days, each day's file records the same cumulative
+        figure — aggregators that sum it across multiple daily files will
+        double-count. See README "History" section.
         """
         out: dict[str, DailySessionEntry] = {}
         for state in self.sessions.values():
@@ -404,7 +404,7 @@ class Monitor:
                 output_tokens=sum(s.output_tokens for s in day_samples),
                 cache_read_tokens=sum(s.cache_read for s in day_samples),
                 cache_creation_tokens=sum(s.cache_creation for s in day_samples),
-                cost_usd=state.hook_cost_usd,
+                session_cumulative_cost_usd=state.hook_cost_usd,
             )
         return out
 
@@ -644,6 +644,13 @@ def install_hook() -> int:
                 f'    "command": "{dest}",\n'
                 '    "padding": 0\n'
                 '  }\n'
+            )
+            return 3
+        if not isinstance(settings, dict):
+            sys.stderr.write(
+                f"⚠  {settings_path} must contain a JSON object at the top level, "
+                f"not {type(settings).__name__}.\n"
+                "Refusing to overwrite.\n"
             )
             return 3
 

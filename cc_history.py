@@ -8,7 +8,8 @@ most the last 12 monthly files.
 The live monitor (cc-session-monitor.py) owns the in-memory session state
 and hands it to HistoryLogger at each write tick. For gaps when the monitor
 was not running, reconstruct_missing_days scans Claude Code's JSONL
-transcripts and writes reconstructed=true files with cost_usd=null.
+transcripts and writes reconstructed=true files with
+session_cumulative_cost_usd=null.
 """
 from __future__ import annotations
 
@@ -105,7 +106,7 @@ class DailySessionEntry:
     output_tokens: int
     cache_read_tokens: int
     cache_creation_tokens: int
-    cost_usd: float | None
+    session_cumulative_cost_usd: float | None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -117,11 +118,14 @@ class DailySessionEntry:
             "output_tokens": self.output_tokens,
             "cache_read_tokens": self.cache_read_tokens,
             "cache_creation_tokens": self.cache_creation_tokens,
-            "cost_usd": self.cost_usd,
+            "session_cumulative_cost_usd": self.session_cumulative_cost_usd,
         }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "DailySessionEntry":
+        cumulative_cost = d.get("session_cumulative_cost_usd")
+        if cumulative_cost is None and "cost_usd" in d:
+            cumulative_cost = d.get("cost_usd")
         return cls(
             project=d["project"],
             model=d.get("model"),
@@ -131,7 +135,9 @@ class DailySessionEntry:
             output_tokens=int(d["output_tokens"]),
             cache_read_tokens=int(d["cache_read_tokens"]),
             cache_creation_tokens=int(d["cache_creation_tokens"]),
-            cost_usd=(float(d["cost_usd"]) if d.get("cost_usd") is not None else None),
+            session_cumulative_cost_usd=(
+                float(cumulative_cost) if cumulative_cost is not None else None
+            ),
         )
 
 
@@ -143,10 +149,15 @@ class DailyRecord:
     sessions: dict[str, DailySessionEntry] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        any_null = any(s.cost_usd is None for s in self.sessions.values())
+        any_null = any(
+            s.session_cumulative_cost_usd is None for s in self.sessions.values()
+        )
         total_cost = (
             None if any_null
-            else sum(s.cost_usd or 0.0 for s in self.sessions.values())
+            else sum(
+                s.session_cumulative_cost_usd or 0.0
+                for s in self.sessions.values()
+            )
         )
         return {
             "date": self.date,
@@ -159,7 +170,7 @@ class DailyRecord:
                 "output_tokens": sum(s.output_tokens for s in self.sessions.values()),
                 "cache_read_tokens": sum(s.cache_read_tokens for s in self.sessions.values()),
                 "cache_creation_tokens": sum(s.cache_creation_tokens for s in self.sessions.values()),
-                "cost_usd": total_cost,
+                "session_cumulative_cost_usd": total_cost,
             },
         }
 
@@ -377,7 +388,7 @@ class HistoryLogger:
                     output_tokens=sum(s.output_tokens for s in samples),
                     cache_read_tokens=sum(s.cache_read for s in samples),
                     cache_creation_tokens=sum(s.cache_creation for s in samples),
-                    cost_usd=None,
+                    session_cumulative_cost_usd=None,
                 )
             rec = DailyRecord(
                 date=d.isoformat(),
