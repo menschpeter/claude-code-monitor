@@ -20,10 +20,10 @@ Rows in the TUI are marked `●` (hook-backed, accurate cost + tokens) or `○` 
 
 ## Features
 
-- **Two views side by side**: "Active" (sessions with activity in the last 5 minutes) and "Billing" (everything in the rolling 5-hour window).
+- **Two views side by side**: "Active" (sessions with activity in the last 15 minutes) and "Today" (everything in the rolling 24-hour window).
 - **Per-session breakdown**: session id, project, last-activity age, input / output / cache-read / total tokens, cost, and two velocities.
 - **Velocity columns**: tokens/second and USD/hour, both over a configurable rolling window.
-- **Upgraded status bar**: folder · model · context % (green/yellow/red) · cost · 5h reset countdown, directly in Claude Code.
+- **Upgraded status bar**: folder · model · context % (green/yellow/red) · cost · Anthropic 5h rate-limit reset countdown, directly in Claude Code.
 - **Graceful degradation**: if `jq` is missing the hook still writes the raw payload and prints a minimal hint instead of silently breaking.
 - **Safe by default**: atomic snapshot writes via `mv(1)`, tail-only JSONL reads, and the hook deliberately does not `set -e` so a bad payload can never blank your status bar.
 
@@ -160,8 +160,8 @@ The hook prints a colored one-liner into Claude Code's status bar. The context-p
 
 ### Panel and accent colors
 
-- **Green panel border** — the "Active" (last 5 min) view.
-- **Blue panel border** — the "Billing" (rolling 5 h) view.
+- **Green panel border** — the "Active" (last 15 min) view.
+- **Blue panel border** — the "Today" (rolling 24 h) view.
 - **Magenta** — project name column.
 - **Cyan** — table headers and the folder name in the status bar.
 - **Dim** — `Cache R` column and separators, deliberately de-emphasized because cache reads are cheap and plentiful.

@@ -6,8 +6,8 @@ per active session, with token/s velocity.
 Reads Claude Code's JSONL transcripts under ~/.claude/projects/<project>/*.jsonl
 and renders two side-by-side panels:
 
-  • ACTIVE (last 5 min) — sessions with activity in the last 5 minutes
-  • BILLING WINDOW (5h)  — all sessions in the current 5h billing block
+  • ACTIVE (last 15 min) — sessions with activity in the last 15 minutes
+  • TODAY (last 24h)     — all sessions active within the last 24 hours
 
 For each session the monitor shows:
   • SessionID (shortened)   — the .jsonl UUID
@@ -62,8 +62,8 @@ except ImportError:
 
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 SNAPSHOT_DIR = Path.home() / ".claude" / "session-monitor" / "snapshots"
-ACTIVE_WINDOW_SECONDS = 5 * 60          # "active" = activity in last 5 min
-BILLING_WINDOW_SECONDS = 5 * 60 * 60    # Anthropic's rolling 5h window
+ACTIVE_WINDOW_SECONDS = 15 * 60         # "active" = activity in last 15 min
+DAILY_WINDOW_SECONDS = 24 * 60 * 60     # rolling 24h "today" window
 VELOCITY_WINDOW_SECONDS = 30            # default rolling velocity window
 
 
@@ -427,8 +427,8 @@ class Monitor:
             reverse=True,
         )
 
-    def billing_window_sessions(self, now: float) -> list[SessionState]:
-        cutoff = now - BILLING_WINDOW_SECONDS
+    def daily_window_sessions(self, now: float) -> list[SessionState]:
+        cutoff = now - DAILY_WINDOW_SECONDS
         return sorted(
             (
                 s for s in self.sessions.values()
@@ -491,7 +491,7 @@ def build_table(
 ) -> Table:
     """
     scope_cutoff: if given, only tokens accumulated at/after this ts are
-    summed (used for the 5h billing view to reflect only what counts in
+    summed (used for the 24h "today" view to reflect only what counts in
     the current window).
     """
     table = Table(
@@ -596,10 +596,10 @@ def build_layout(
     velocity_window: int,
 ) -> Layout:
     now = time.time()
-    billing_cutoff = now - BILLING_WINDOW_SECONDS
+    daily_cutoff = now - DAILY_WINDOW_SECONDS
 
     active = monitor.active_sessions(now)
-    window = monitor.billing_window_sessions(now)
+    daily = monitor.daily_window_sessions(now)
 
     active_tbl = build_table(
         f"🔥 Active sessions (last {ACTIVE_WINDOW_SECONDS // 60} min)",
@@ -607,12 +607,12 @@ def build_layout(
         now,
         velocity_window,
     )
-    billing_tbl = build_table(
-        "📊 Current 5h billing window",
-        window,
+    daily_tbl = build_table(
+        f"📊 Today (last {DAILY_WINDOW_SECONDS // 3600}h)",
+        daily,
         now,
         velocity_window,
-        scope_cutoff=billing_cutoff,
+        scope_cutoff=daily_cutoff,
     )
 
     header = Text.assemble(
@@ -636,11 +636,11 @@ def build_layout(
     layout.split_column(
         Layout(Align.center(header), name="header", size=1),
         Layout(name="active"),
-        Layout(name="billing"),
+        Layout(name="daily"),
         Layout(Align.center(footer), name="footer", size=2),
     )
     layout["active"].update(Panel(active_tbl, border_style="green"))
-    layout["billing"].update(Panel(billing_tbl, border_style="blue"))
+    layout["daily"].update(Panel(daily_tbl, border_style="blue"))
     return layout
 
 
