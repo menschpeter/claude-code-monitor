@@ -8,7 +8,7 @@ Reads Claude Code's JSONL transcripts under ~/.claude/projects/<project>/*.jsonl
 and renders two side-by-side panels:
 
   • ACTIVE (last 15 min) — sessions with activity in the last 15 minutes
-  • TODAY (last 24h)     — all sessions active within the last 24 hours
+  • TODAY (since 00:00)  — all sessions with activity since local midnight
 
 For each session the monitor shows:
   • SessionID (shortened)   — the .jsonl UUID
@@ -76,8 +76,14 @@ from cc_history import (
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 SNAPSHOT_DIR = Path.home() / ".claude" / "session-monitor" / "snapshots"
 ACTIVE_WINDOW_SECONDS = 15 * 60         # "active" = activity in last 15 min
-DAILY_WINDOW_SECONDS = 24 * 60 * 60     # rolling 24h "today" window
 VELOCITY_WINDOW_SECONDS = 30            # default rolling velocity window
+
+
+def local_midnight_ts(now: float) -> float:
+    """Unix timestamp of the most recent local-midnight on or before `now`."""
+    return datetime.fromtimestamp(now).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ).timestamp()
 
 
 # ---------------------------------------------------------------------------
@@ -364,7 +370,7 @@ class Monitor:
         )
 
     def daily_window_sessions(self, now: float) -> list[SessionState]:
-        cutoff = now - DAILY_WINDOW_SECONDS
+        cutoff = local_midnight_ts(now)
         return sorted(
             (
                 s for s in self.sessions.values()
@@ -452,8 +458,8 @@ def build_table(
 ) -> Table:
     """
     scope_cutoff: if given, only tokens accumulated at/after this ts are
-    summed (used for the 24h "today" view to reflect only what counts in
-    the current window).
+    summed (used for the calendar-day "today" view to reflect only what
+    counts in the current window).
     """
     table = Table(
         title=title,
@@ -557,7 +563,7 @@ def build_layout(
     velocity_window: int,
 ) -> Layout:
     now = time.time()
-    daily_cutoff = now - DAILY_WINDOW_SECONDS
+    daily_cutoff = local_midnight_ts(now)
 
     active = monitor.active_sessions(now)
     daily = monitor.daily_window_sessions(now)
@@ -569,7 +575,7 @@ def build_layout(
         velocity_window,
     )
     daily_tbl = build_table(
-        f"📊 Today (last {DAILY_WINDOW_SECONDS // 3600}h)",
+        "📊 Today (since 00:00)",
         daily,
         now,
         velocity_window,

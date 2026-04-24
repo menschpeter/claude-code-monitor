@@ -23,7 +23,7 @@ Rows in the TUI are marked `●` (hook-backed, accurate cost + tokens) or `○` 
 
 ## Features
 
-- **Two views side by side**: "Active" (sessions with activity in the last 15 minutes) and "Today" (everything in the rolling 24-hour window).
+- **Two views side by side**: "Active" (sessions with activity in the last 15 minutes) and "Today" (everything with activity since local midnight).
 - **Per-session breakdown**: session id, project, last-activity age, input / output / cache-read / total tokens, cost, and two velocities.
 - **Velocity columns**: tokens/second and USD/hour, both over a configurable rolling window.
 - **Upgraded status bar**: folder · model · context % (green/yellow/red) · cost · Anthropic 5h rate-limit reset countdown, directly in Claude Code.
@@ -164,7 +164,7 @@ The hook prints a colored one-liner into Claude Code's status bar. The context-p
 ### Panel and accent colors
 
 - **Green panel border** — the "Active" (last 15 min) view.
-- **Blue panel border** — the "Today" (rolling 24 h) view.
+- **Blue panel border** — the "Today" (since local midnight) view.
 - **Magenta** — project name column.
 - **Cyan** — table headers and the folder name in the status bar.
 - **Dim** — `Cache R` column and separators, deliberately de-emphasized because cache reads are cheap and plentiful.
