@@ -651,11 +651,30 @@ def build_layout(
 # Hook installer
 # ---------------------------------------------------------------------------
 
+def _hook_src_and_dest(here: Path) -> tuple[Path, Path, str]:
+    """Return (src_path, dest_path, command_string) for the current platform.
+
+    On Windows the PowerShell hook is used; on all other platforms the bash
+    hook is used.  The command string is what gets written into settings.json.
+    """
+    claude_dir = Path.home() / ".claude"
+    if os.name == "nt":
+        src = here / "cc-monitor-hook.ps1"
+        dest = claude_dir / "cc-monitor-hook.ps1"
+        # Use the full path so Claude Code can find it regardless of cwd.
+        command = f"powershell -NoProfile -NonInteractive -File \"{dest}\""
+    else:
+        src = here / "cc-monitor-hook.sh"
+        dest = claude_dir / "cc-monitor-hook.sh"
+        command = str(dest)
+    return src, dest, command
+
+
 def install_hook() -> int:
     """Copy the hook script next to ~/.claude/ and patch settings.json."""
-    # The hook ships beside this .py file under the name below.
     here = Path(__file__).resolve().parent
-    src = here / "cc-monitor-hook.sh"
+    src, dest, command = _hook_src_and_dest(here)
+
     if not src.exists():
         sys.stderr.write(
             f"Hook script not found at {src}.\n"
@@ -666,10 +685,10 @@ def install_hook() -> int:
 
     claude_dir = Path.home() / ".claude"
     claude_dir.mkdir(exist_ok=True)
-    dest = claude_dir / "cc-monitor-hook.sh"
 
     dest.write_text(src.read_text())
-    dest.chmod(0o755)
+    if os.name != "nt":
+        dest.chmod(0o755)
 
     settings_path = claude_dir / "settings.json"
     settings: dict = {}
@@ -683,7 +702,7 @@ def install_hook() -> int:
                 "Add this entry manually:\n\n"
                 '  "statusLine": {\n'
                 '    "type": "command",\n'
-                f'    "command": "{dest}",\n'
+                f'    "command": "{command}",\n'
                 '    "padding": 0\n'
                 '  }\n'
             )
@@ -697,7 +716,7 @@ def install_hook() -> int:
             return 3
 
     existing = settings.get("statusLine")
-    if existing and existing.get("command") != str(dest):
+    if existing and existing.get("command") != command:
         print(
             f"⚠  settings.json already has a statusLine: "
             f"{existing.get('command')!r}"
@@ -709,7 +728,7 @@ def install_hook() -> int:
 
     settings["statusLine"] = {
         "type": "command",
-        "command": str(dest),
+        "command": command,
         "padding": 0,
     }
     settings_path.write_text(json.dumps(settings, indent=2) + "\n")

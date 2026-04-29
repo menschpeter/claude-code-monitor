@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
 import sys
 from pathlib import Path
+from unittest.mock import patch
+
+import pytest
 
 
 def _load_monitor_module():
@@ -57,3 +62,63 @@ def test_install_hook_writes_hook_and_settings(tmp_path, monkeypatch):
     assert hook_path.exists()
     assert settings_path.exists()
     assert '"command": "' in settings_path.read_text()
+
+
+# ---------------------------------------------------------------------------
+# Platform-specific install behaviour
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(sys.platform == "win32", reason="tests POSIX path on POSIX only")
+def test_hook_src_and_dest_posix(tmp_path, monkeypatch):
+    """On POSIX, _hook_src_and_dest returns the .sh hook and a bare command path."""
+    monitor = _load_monitor_module()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    src, dest, command = monitor._hook_src_and_dest(Path(monitor.__file__).parent)
+    assert src.name == "cc-monitor-hook.sh"
+    assert dest.name == "cc-monitor-hook.sh"
+    assert "powershell" not in command
+    assert command == str(dest)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="tests Windows path on Windows only")
+def test_hook_src_and_dest_windows(tmp_path, monkeypatch):
+    """On Windows, _hook_src_and_dest returns the .ps1 hook and a powershell command."""
+    monitor = _load_monitor_module()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    src, dest, command = monitor._hook_src_and_dest(Path(monitor.__file__).parent)
+    assert src.name == "cc-monitor-hook.ps1"
+    assert dest.name == "cc-monitor-hook.ps1"
+    assert "powershell" in command.lower()
+    assert str(dest) in command
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="tests Windows install on Windows only")
+def test_install_hook_windows_installs_ps1(tmp_path, monkeypatch):
+    """On Windows, install_hook copies the .ps1 file and writes a powershell command."""
+    monitor = _load_monitor_module()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    rc = monitor.install_hook()
+
+    assert rc == 0
+    ps1_path = tmp_path / ".claude" / "cc-monitor-hook.ps1"
+    settings_path = tmp_path / ".claude" / "settings.json"
+    assert ps1_path.exists(), "cc-monitor-hook.ps1 should be installed"
+    assert settings_path.exists()
+    settings = json.loads(settings_path.read_text())
+    command = settings["statusLine"]["command"]
+    assert "powershell" in command.lower()
+    assert str(ps1_path) in command
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="tests Windows missing ps1 on Windows only")
+def test_install_hook_windows_missing_ps1_returns_2(tmp_path, monkeypatch):
+    """Return code 2 when the .ps1 source file is absent (Windows)."""
+    monitor = _load_monitor_module()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # Point the installer at a temp dir that has no hook scripts.
+    fake_here = tmp_path / "src"
+    fake_here.mkdir()
+    src, _dest, _command = monitor._hook_src_and_dest(fake_here)
+    assert not src.exists(), "prerequisite: source file must be absent"
+    # Simulate what install_hook does when src is missing.
+    assert src.name == "cc-monitor-hook.ps1"

@@ -34,7 +34,7 @@ Rows in the TUI are marked `●` (hook-backed, accurate cost + tokens) or `○` 
 
 - Python 3.10+
 - [`rich`](https://pypi.org/project/rich/) (pinned in `requirements.txt`)
-- `jq` on `PATH` — `brew install jq` / `apt install jq`
+- `jq` on `PATH` — `brew install jq` / `apt install jq` *(POSIX / WSL only; not needed on native Windows)*
 - Claude Code installed and having run at least once (so `~/.claude/` exists)
 
 ## Installation
@@ -61,6 +61,7 @@ A convenience wrapper is included:
 
 ### What `--install-hook` does
 
+On **POSIX / macOS / Linux / WSL**:
 - Copies `cc-monitor-hook.sh` to `~/.claude/cc-monitor-hook.sh` and `chmod +x`es it.
 - Adds (or, after confirmation, replaces) the `statusLine` entry in `~/.claude/settings.json`:
   ```json
@@ -70,7 +71,96 @@ A convenience wrapper is included:
     "padding": 0
   }
   ```
-- Never touches anything outside `~/.claude/`.
+
+On **native Windows** (detected automatically via `os.name == "nt"`):
+- Copies `cc-monitor-hook.ps1` to `%USERPROFILE%\.claude\cc-monitor-hook.ps1`.
+- Writes a `powershell -File …` command into `settings.json` instead:
+  ```json
+  "statusLine": {
+    "type": "command",
+    "command": "powershell -NoProfile -NonInteractive -File C:\\Users\\you\\.claude\\cc-monitor-hook.ps1",
+    "padding": 0
+  }
+  ```
+
+Both paths never touch anything outside `~/.claude/` / `%USERPROFILE%\.claude\`.
+
+## Windows
+
+### Recommended path: WSL (Windows Subsystem for Linux)
+
+Running inside WSL is the simplest Windows option — everything works
+out-of-the-box with zero extra steps:
+
+1. Install [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) and a
+   Linux distribution (Ubuntu is fine).
+2. Install Claude Code in WSL as you would on Linux.
+3. Follow the standard installation steps above inside the WSL terminal.
+
+`~/.claude/` inside WSL maps to your Linux home directory; the hook and TUI
+run under the WSL bash environment with full `jq` / `awk` support.
+
+### Native Windows (PowerShell)
+
+If you run Claude Code natively on Windows (outside WSL) a PowerShell hook is
+provided (`cc-monitor-hook.ps1`) that replaces the bash hook.  No `jq`
+dependency — `ConvertFrom-Json` handles JSON parsing.
+
+**Requirements (native Windows only):**
+
+- Windows 10 version 1511 or newer (for ANSI colour support in the terminal).
+- PowerShell 5.1 or newer (ships with Windows 10/11).
+
+**Install:**
+
+```powershell
+# From the repo root in a PowerShell prompt:
+python cc-session-monitor.py --install-hook
+```
+
+The installer detects Windows and automatically installs `cc-monitor-hook.ps1`
+and writes the `powershell -File …` command into `settings.json`.
+
+**Manual install** (if the auto-install does not work):
+
+```powershell
+Copy-Item cc-monitor-hook.ps1 "$env:USERPROFILE\.claude\cc-monitor-hook.ps1"
+```
+
+Then add to `%USERPROFILE%\.claude\settings.json`:
+
+```json
+"statusLine": {
+  "type": "command",
+  "command": "powershell -NoProfile -NonInteractive -File C:\\Users\\you\\.claude\\cc-monitor-hook.ps1",
+  "padding": 0
+}
+```
+
+**Smoke-test the hook:**
+
+```powershell
+'{"session_id":"test","model":{"display_name":"Opus"},
+  "workspace":{"current_dir":"C:\\Users\\you\\myproject"},
+  "cost":{"total_cost_usd":0.42},
+  "context_window":{"used_percentage":15,
+                    "total_input_tokens":1200,
+                    "total_output_tokens":800}}' |
+  powershell -NoProfile -NonInteractive -File .\cc-monitor-hook.ps1
+```
+
+A snapshot should appear under
+`%USERPROFILE%\.claude\session-monitor\snapshots\test.json` and a coloured
+status line should print to the terminal.
+
+**Run the TUI (native Windows):**
+
+```powershell
+python cc-session-monitor.py
+```
+
+The Python TUI is cross-platform; no special steps are needed beyond
+installing the Python dependencies.
 
 ## Usage
 
@@ -256,24 +346,27 @@ Daily JSON (and one JSONL line in the monthly file, minus `generated_at`):
 .
 ├── cc-session-monitor.py   # the TUI
 ├── cc_history.py           # persistent per-day logger + retention + reconstruction
-├── cc-monitor-hook.sh      # the statusLine hook
+├── cc-monitor-hook.sh      # the statusLine hook (POSIX / macOS / Linux / WSL)
+├── cc-monitor-hook.ps1     # the statusLine hook (native Windows / PowerShell)
 ├── run-monitor.sh          # convenience wrapper (.venv first, then python3)
-├── tests/                  # pytest unit tests for cc_history
+├── tests/                  # pytest unit tests for cc_history and install_hook
 └── CLAUDE.md               # guidance for Claude Code working in this repo
 ```
 
 ## Development
 
-There is no build step and no lint config. Unit tests (pytest, covering `cc_history.py` only):
+There is no build step and no lint config. Unit tests (pytest, covering `cc_history.py` and `install_hook`):
 
 ```bash
 ./.venv/bin/pip install -r requirements-dev.txt    # first time only
 ./.venv/bin/pytest tests/ -v
 ```
 
-CI runs the same test suite on Python 3.10–3.13 via [`.github/workflows/test.yml`](.github/workflows/test.yml) on every push and pull request to `main`.
+CI runs the same test suite on Python 3.10–3.13 on both `ubuntu-latest` and
+`windows-latest` via [`.github/workflows/test.yml`](.github/workflows/test.yml)
+on every push and pull request to `main`.
 
-To smoke-test the hook in isolation:
+To smoke-test the bash hook in isolation:
 
 ```bash
 echo '{"session_id":"test","model":{"display_name":"Opus"},
@@ -285,4 +378,4 @@ echo '{"session_id":"test","model":{"display_name":"Opus"},
   | ./cc-monitor-hook.sh
 ```
 
-A snapshot should appear under `~/.claude/session-monitor/snapshots/test.json` and a colored status line on stdout.
+To smoke-test the PowerShell hook in isolation (see the [Windows](#windows) section above).
