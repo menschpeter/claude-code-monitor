@@ -108,7 +108,7 @@ dependency — `ConvertFrom-Json` handles JSON parsing.
 
 **Requirements (native Windows only):**
 
-- Windows 10 version 1511 or newer (for ANSI colour support in the terminal).
+- Windows 10 version 1511 or newer (for ANSI color support in the terminal).
 - PowerShell 5.1 or newer (ships with Windows 10/11).
 
 **Install:**
@@ -150,7 +150,7 @@ Then add to `%USERPROFILE%\.claude\settings.json`:
 ```
 
 A snapshot should appear under
-`%USERPROFILE%\.claude\session-monitor\snapshots\test.json` and a coloured
+`%USERPROFILE%\.claude\session-monitor\snapshots\test.json` and a colored
 status line should print to the terminal.
 
 **Run the TUI (native Windows):**

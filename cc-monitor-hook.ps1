@@ -104,9 +104,7 @@ $cache_create = Get-SafeValue $payload @("context_window","cache_creation_input_
 $rl5_pct     = Get-SafeValue $payload @("rate_limits","five_hour","used_percentage") -Default 0
 $rl5_reset   = Get-SafeValue $payload @("rate_limits","five_hour","resets_at")       -Default 0
 
-$now_ts = [int][double]::Parse(
-    [System.DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-)
+$now_ts = [int][System.DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 
 # ---------- Write snapshot (atomic via rename) ----------
 if (![string]::IsNullOrWhiteSpace($session_id)) {
