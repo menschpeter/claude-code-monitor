@@ -33,3 +33,13 @@ jobs:
 
       - name: Run pytest
         run: pytest tests/ -v
+
+      - name: PowerShell hook syntax check
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $tokens = $null; $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path 'cc-monitor-hook.ps1').Path,
+              [ref]$tokens, [ref]$errors)
+          if ($errors.Count -gt 0) { $errors; exit 1 }

@@ -47,23 +47,26 @@ $SnapshotDir = Join-Path $HOME ".claude\session-monitor\snapshots"
 $null = New-Item -ItemType Directory -Force -Path $SnapshotDir
 
 # Slurp stdin once.
-$Input_data = $input | Out-String
+$inputJson = $input | Out-String
 
-if ([string]::IsNullOrWhiteSpace($Input_data)) {
+if ([string]::IsNullOrWhiteSpace($inputJson)) {
     Write-Host "cc-monitor: no input"
     exit 0
 }
 
-# Parse JSON.  If it fails, print a minimal hint and exit without error so
-# the status bar always shows something.
+# Parse JSON.  If it fails, dump the raw payload for debugging and print a
+# minimal hint so the status bar always shows something.
 try {
-    $payload = $Input_data | ConvertFrom-Json
+    $payload = $inputJson | ConvertFrom-Json
 } catch {
+    try { Set-Content -Path "$SnapshotDir\_last-raw.json" -Value $inputJson -Encoding UTF8 } catch {}
     Write-Host "cc-monitor: invalid JSON payload"
     exit 0
 }
 
-# ---------- Helper: null-safe property access ----------
+# ---------- Helper: null-safe property access (PS 5.1-compatible) ----------
+# NOTE: the ?. null-conditional operator requires PS 7.1+; we use an explicit
+# property lookup so the hook runs on the default Windows PowerShell 5.1.
 function Get-SafeValue {
     param(
         [Parameter(ValueFromPipeline=$true)] $Obj,
@@ -73,7 +76,9 @@ function Get-SafeValue {
     $cur = $Obj
     foreach ($key in $Path) {
         if ($null -eq $cur) { return $Default }
-        $cur = $cur.PSObject.Properties[$key]?.Value
+        $prop = $cur.PSObject.Properties[$key]
+        if ($null -eq $prop) { return $Default }
+        $cur = $prop.Value
     }
     if ($null -eq $cur) { return $Default }
     return $cur
@@ -109,7 +114,7 @@ $now_ts = [int][System.DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 # ---------- Write snapshot (atomic via rename) ----------
 if (![string]::IsNullOrWhiteSpace($session_id)) {
     $snapshot_path = Join-Path $SnapshotDir "$session_id.json"
-    $tmp_path      = Join-Path $SnapshotDir ".$session_id.tmp.$$"
+    $tmp_path      = Join-Path $SnapshotDir ".$session_id.tmp.$([guid]::NewGuid().ToString('N'))"
 
     $snapshot = [ordered]@{
         snapshot_ts    = $now_ts

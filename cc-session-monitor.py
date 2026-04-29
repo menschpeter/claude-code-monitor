@@ -683,7 +683,7 @@ def install_hook() -> int:
         )
         return 2
 
-    claude_dir = Path.home() / ".claude"
+    claude_dir = dest.parent  # already computed by _hook_src_and_dest
     claude_dir.mkdir(exist_ok=True)
 
     dest.write_text(src.read_text())

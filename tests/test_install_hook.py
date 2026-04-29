@@ -68,6 +68,19 @@ def test_install_hook_writes_hook_and_settings(tmp_path, monkeypatch):
 # Platform-specific install behaviour
 # ---------------------------------------------------------------------------
 
+def test_install_hook_missing_source_returns_2(tmp_path, monkeypatch):
+    """install_hook returns 2 when the hook source file is absent (any platform)."""
+    monitor = _load_monitor_module()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    absent_src = tmp_path / "src" / "cc-monitor-hook.sh"  # never created
+    fake_dest = tmp_path / ".claude" / "cc-monitor-hook.sh"
+    monkeypatch.setattr(monitor, "_hook_src_and_dest", lambda here: (absent_src, fake_dest, str(fake_dest)))
+
+    rc = monitor.install_hook()
+
+    assert rc == 2
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="tests POSIX path on POSIX only")
 def test_hook_src_and_dest_posix(tmp_path, monkeypatch):
     """On POSIX, _hook_src_and_dest returns the .sh hook and a bare command path."""
@@ -112,13 +125,15 @@ def test_install_hook_windows_installs_ps1(tmp_path, monkeypatch):
 
 @pytest.mark.skipif(sys.platform != "win32", reason="tests Windows missing ps1 on Windows only")
 def test_install_hook_windows_missing_ps1_returns_2(tmp_path, monkeypatch):
-    """Return code 2 when the .ps1 source file is absent (Windows)."""
+    """install_hook returns 2 when the .ps1 source file is absent (Windows)."""
     monitor = _load_monitor_module()
     monkeypatch.setenv("HOME", str(tmp_path))
-    # Point the installer at a temp dir that has no hook scripts.
-    fake_here = tmp_path / "src"
-    fake_here.mkdir()
-    src, _dest, _command = monitor._hook_src_and_dest(fake_here)
-    assert not src.exists(), "prerequisite: source file must be absent"
-    # Simulate what install_hook does when src is missing.
-    assert src.name == "cc-monitor-hook.ps1"
+    # Return a .ps1 src path that does not exist so install_hook hits the rc==2 branch.
+    absent_src = tmp_path / "src" / "cc-monitor-hook.ps1"  # never created
+    fake_dest = tmp_path / ".claude" / "cc-monitor-hook.ps1"
+    fake_cmd = f'powershell -NoProfile -NonInteractive -File "{fake_dest}"'
+    monkeypatch.setattr(monitor, "_hook_src_and_dest", lambda here: (absent_src, fake_dest, fake_cmd))
+
+    rc = monitor.install_hook()
+
+    assert rc == 2
