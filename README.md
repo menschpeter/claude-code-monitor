@@ -24,8 +24,8 @@ Rows in the TUI are marked `●` (hook-backed, accurate cost + tokens) or `○` 
 ## Features
 
 - **Two views side by side**: "Active" (sessions with activity in the last 15 minutes) and "Today" (everything with activity since local midnight).
-- **Per-session breakdown**: session id, project, last-activity age, input / output / cache-read / total tokens, cost, and two velocities.
-- **Velocity columns**: tokens/second and USD/hour, both over a configurable rolling window.
+- **Per-session breakdown**: session id, project, last-activity age, input / output / cache-read / total tokens, cost, and three velocities.
+- **Velocity columns**: total throughput (`t/s`, includes cache), generation rate (`out/s`, output tokens only), and cost rate (`$/h`), all over a configurable rolling window.
 - **Upgraded status bar**: folder · model · context % (green/yellow/red) · cost · Anthropic 5h rate-limit reset countdown, directly in Claude Code.
 - **Graceful degradation**: if `jq` is missing the hook still writes the raw payload and prints a minimal hint instead of silently breaking.
 - **Safe by default**: atomic snapshot writes via `mv(1)`, tail-only JSONL reads, and the hook deliberately does not `set -e` so a bad payload can never blank your status bar.
@@ -83,7 +83,7 @@ python cc-session-monitor.py [OPTIONS]
 | Flag | Default | Description |
 |---|---|---|
 | `--refresh <sec>` | `1.0` | TUI redraw interval in seconds (float). Smaller = smoother, more CPU. |
-| `--velocity-window <sec>` | `30` | Rolling window for the `t/s` and `$/h` velocity columns. Larger = smoother, smaller = more reactive. |
+| `--velocity-window <sec>` | `30` | Rolling window for the `t/s`, `out/s`, and `$/h` velocity columns. Larger = smoother, smaller = more reactive. |
 | `--projects-dir <path>` | `~/.claude/projects` | Where to read JSONL transcripts from. Change only if Claude Code stores data elsewhere. |
 | `--snapshot-dir <path>` | `~/.claude/session-monitor/snapshots` | Where the hook writes snapshots. Must match the hook's target. |
 | `--install-hook` | — | One-shot: install the hook into `~/.claude/` and exit. No monitor run. |
@@ -109,7 +109,8 @@ python cc-session-monitor.py --refresh 0.5 --velocity-window 10
 | **Output** | Cumulative output tokens since session start | Hook (accurate) or JSONL (approx) |
 | **Cache R** | Cache-read tokens (the cheap, reused kind) | JSONL (reliable) |
 | **Total** | `Input + Output + Cache-Read + Cache-Create` | Computed |
-| **t/s** | Token throughput over the velocity window | Computed from JSONL |
+| **t/s** | Total token throughput over the velocity window — sums **all** token types (input + output + cache-read + cache-create). Cache-reads usually dominate, so this tracks data flow, not work done. | Computed from JSONL |
+| **out/s** | Generation rate: **output tokens per second only**. The "real work" signal — the cost-relevant tokens the model actually produced. See *Accuracy caveat* below. | Computed from JSONL |
 | **Cost** | Cumulative USD since session start | Hook |
 | **$/h** | Cost rate extrapolated to one hour, over the velocity window | Computed from hook snapshots |
 
@@ -120,38 +121,30 @@ A **TOTAL** footer row sums all sessions currently visible in that panel.
 - **`●` green** — hook is installed for this session; `Cost` and context tokens are **accurate**.
 - **`○` yellow** — JSONL-only fallback; `Input` / `Output` are **streaming placeholders** (underestimate real billed tokens). Install the hook to fix this.
 
-### `t/s` colors — throughput, NOT cost
+### Velocity columns — what's a warning, what's just info
 
-`t/s` sums **all** token types equally (input + output + cache-read + cache-create). Because cache-read tokens are cheap but can flow at very high rates, a red `t/s` does *not* mean "expensive" — it means "lots of tokens per second".
+Only **`$/h`** is a warning metric (red = burning money). `t/s` and `out/s` are informational — high throughput or fast generation isn't bad, so they're rendered in a single neutral color.
 
-| Color | Range | Typical cause |
+| Column | Color | Meaning |
 |---|---|---|
-| dim "idle" | 0 t/s | no activity |
-| green | `< 100 t/s` | normal interaction |
-| bold yellow | `100–999 t/s` | heavy tool output, big file reads |
-| bold red | `≥ 1000 t/s` (shown as `X.XK t/s`) | very high throughput — often cache-reads or a streaming agent |
+| `t/s` | dim "idle" / cyan | informational — total throughput incl. cache; high values usually mean the cache is shuttling data |
+| `out/s` | dim "idle" / **bold cyan** | informational — emphasized because it's the actual generation rate |
+| `$/h` | dim `—` / green / yellow / **bold red** | warning metric — green `< $1/h`, yellow `$1–$5/h`, bold red `≥ $5/h` |
 
-### `$/h` colors — actual cost velocity
+#### Accuracy caveat for `out/s` (and `Output`)
 
-This is the one that reflects money leaving your wallet (or would, on API billing).
+`out/s` is computed from `output_tokens` values in Claude Code's JSONL transcripts. Those values are streaming placeholders and tend to **undercount** real billed output (same caveat as the `Output` column on `○`-marked rows). The hook can't supply an accurate series because it only carries a cumulative snapshot — fine for a single number, not enough for a rate. Treat `out/s` as a **good-enough order of magnitude**, not a billing-accurate figure. The `$/h` column remains the authoritative cost-rate signal because it's derived from `total_cost_usd` snapshots written by the hook.
 
-| Color | Range |
-|---|---|
-| dim `—` | no hook data, or idle |
-| green | `< $1/h` |
-| yellow | `$1–$5/h` |
-| bold red | `≥ $5/h` |
+### Reading the velocities together
 
-### Reading `t/s` and `$/h` together
+The interesting signal is the relationship between the three:
 
-The combination is where the useful signal lives:
-
-| `t/s` | `$/h` | Interpretation |
-|---|---|---|
-| red | green | **Cache working well** — high volume, low cost. Ideal. |
-| green | red | **Short but expensive turns** — usually Opus reasoning without cache hits. |
-| red | red | **Heavy Opus work without cache** — the real cost-burner. |
-| green | green | Quiet. |
+| `t/s` | `out/s` | `$/h` | Interpretation |
+|---|---|---|---|
+| high | low | low | **Cache working well** — lots of context flowing, model not generating much, low cost. Ideal. |
+| high | high | high | **Heavy generation, cache not helping enough** — usually Opus reasoning without cache hits. |
+| low | low | high | **Short, expensive turns** — small but pricey work (Opus first-token without cache). |
+| any | any | low | Quiet or cache-friendly. |
 
 ### Status-bar colors (Claude Code itself, not the TUI)
 
@@ -166,11 +159,11 @@ The hook prints a colored one-liner into Claude Code's status bar. The context-p
 - **Green panel border** — the "Active" (last 15 min) view.
 - **Blue panel border** — the "Today" (since local midnight) view.
 - **Magenta** — project name column.
-- **Cyan** — table headers and the folder name in the status bar.
+- **Cyan** — table headers, the `t/s` and `out/s` columns (the latter in **bold cyan** for emphasis), and the folder name in the status bar.
 - **Dim** — `Cache R` column and separators, deliberately de-emphasized because cache reads are cheap and plentiful.
 - The **TOTAL** footer highlights the summed token count on dark-cyan and, if non-zero, the summed cost on green.
 
-Thresholds for the velocity colors are hard-coded in `_fmt_velocity` (cc-session-monitor.py:473) and the `$/h` block of `build_table` (cc-session-monitor.py:550). Tweak them there if your usage pattern makes the defaults feel off.
+The `$/h` thresholds are hard-coded in the cost-velocity block of `build_table` (`cc-session-monitor.py:552`). `t/s` and `out/s` are intentionally single-color (informational, not warnings) — see `_fmt_velocity` / `_fmt_output_velocity` (`cc-session-monitor.py:455`). Tweak any of these if your usage pattern makes the defaults feel off.
 
 ## How it works
 
@@ -253,6 +246,7 @@ Daily JSON (and one JSONL line in the monthly file, minus `generated_at`):
 ## Known limitations
 
 - **JSONL input/output tokens undercount.** This is a property of Claude Code's transcripts (see [gille.ai's analysis](https://gille.ai/)), not of this tool. Until the hook has fired at least once for a session, the TUI falls back to JSONL values and marks the row `○` to flag that they're approximate.
+- **`out/s` inherits that undercount.** It's computed from the same JSONL `output_tokens` field. The hook only snapshots cumulative state, not a series, so we can't build a hook-backed rate. `out/s` is reliable for "is the model generating, roughly how fast", but not for billing math — use `Cost`/`$/h` for that.
 - **Cache tokens come from JSONL only** — the `statusLine` payload doesn't expose them directly. They are reliable there.
 - **Sessions outside `~/.claude/projects/`** (rare) are discovered only when the hook fires, since discovery normally walks that directory.
 

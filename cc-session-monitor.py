@@ -90,6 +90,22 @@ def local_midnight_ts(now: float) -> float:
 # Data model
 # ---------------------------------------------------------------------------
 
+def _series_rate(points: deque, window_seconds: int, now: float) -> float:
+    """Linear rate over the last `window_seconds` for a (ts, running_total)
+    series. Falls back to the last two points if the window is too narrow."""
+    if len(points) < 2:
+        return 0.0
+    cutoff = now - window_seconds
+    pts = [p for p in points if p[0] >= cutoff]
+    if len(pts) < 2:
+        pts = list(points)[-2:]
+    (t0, v0), (t1, v1) = pts[0], pts[-1]
+    dt = t1 - t0
+    if dt <= 0:
+        return 0.0
+    return max(0.0, (v1 - v0) / dt)
+
+
 @dataclass
 class SessionState:
     session_id: str                 # .jsonl filename stem (uuid)
@@ -102,6 +118,8 @@ class SessionState:
 
     # rolling velocity: (ts, total_tokens_at_ts) pairs
     velocity_points: deque = field(default_factory=lambda: deque(maxlen=2000))
+    # parallel series for output-only tokens
+    output_velocity_points: deque = field(default_factory=lambda: deque(maxlen=2000))
 
     first_ts: float | None = None
     last_ts: float | None = None
@@ -143,20 +161,12 @@ class SessionState:
         return agg
 
     def velocity(self, window_seconds: int, now: float) -> float:
-        """Tokens per second over the last `window_seconds`."""
-        if len(self.velocity_points) < 2:
-            return 0.0
-        cutoff = now - window_seconds
-        # find first point inside window
-        pts = [p for p in self.velocity_points if p[0] >= cutoff]
-        if len(pts) < 2:
-            # fall back to the last two points if the window is too narrow
-            pts = list(self.velocity_points)[-2:]
-        (t0, v0), (t1, v1) = pts[0], pts[-1]
-        dt = t1 - t0
-        if dt <= 0:
-            return 0.0
-        return max(0.0, (v1 - v0) / dt)
+        """Tokens per second over the last `window_seconds` (all token types)."""
+        return _series_rate(self.velocity_points, window_seconds, now)
+
+    def output_velocity(self, window_seconds: int, now: float) -> float:
+        """Output tokens per second — the actual generation rate."""
+        return _series_rate(self.output_velocity_points, window_seconds, now)
 
     def cost_velocity(self, window_seconds: int, now: float) -> float:
         """USD per hour over the last `window_seconds`. 0 if unknown."""
@@ -242,6 +252,7 @@ class Monitor:
                 # full reset of the in-memory view
                 state.samples.clear()
                 state.velocity_points.clear()
+                state.output_velocity_points.clear()
                 state.first_ts = None
                 state.last_ts = None
 
@@ -280,10 +291,14 @@ class Monitor:
             # Cheap enough; sessions rarely exceed a few thousand samples.
             ordered = sorted(state.samples.values(), key=lambda s: s.ts)
             running = 0
+            running_out = 0
             state.velocity_points.clear()
+            state.output_velocity_points.clear()
             for s in ordered:
                 running += s.total
+                running_out += s.output_tokens
                 state.velocity_points.append((s.ts, running))
+                state.output_velocity_points.append((s.ts, running_out))
 
         # ----- Second pass: read any snapshot files dropped by the hook -----
         self._refresh_snapshots()
@@ -438,15 +453,30 @@ def _fmt_age(seconds: float) -> str:
 
 
 def _fmt_velocity(tps: float) -> Text:
+    """Throughput across all token types — informational, not a warning.
+
+    Cache-reads dominate this number, so it tracks data flow rather than
+    cost or 'real work'. See `_fmt_output_velocity` for generation rate
+    and the `$/h` formatter (inline in build_table) for the warning metric.
+    """
+    if tps <= 0:
+        return Text("idle", style="dim")
     if tps >= 1000:
-        t = Text(f"{tps/1000:.2f}K t/s", style="bold red")
-    elif tps >= 100:
-        t = Text(f"{tps:.0f} t/s", style="bold yellow")
-    elif tps > 0:
-        t = Text(f"{tps:.1f} t/s", style="green")
-    else:
-        t = Text("idle", style="dim")
-    return t
+        return Text(f"{tps/1000:.2f}K t/s", style="cyan")
+    if tps >= 100:
+        return Text(f"{tps:.0f} t/s", style="cyan")
+    return Text(f"{tps:.1f} t/s", style="cyan")
+
+
+def _fmt_output_velocity(tps: float) -> Text:
+    """Generation rate (output tokens only) — the 'real work' signal."""
+    if tps <= 0:
+        return Text("idle", style="dim")
+    if tps >= 1000:
+        return Text(f"{tps/1000:.2f}K o/s", style="bold cyan")
+    if tps >= 100:
+        return Text(f"{tps:.0f} o/s", style="bold cyan")
+    return Text(f"{tps:.1f} o/s", style="bold cyan")
 
 
 def build_table(
@@ -476,6 +506,7 @@ def build_table(
     table.add_column("Cache R", justify="right", style="dim")
     table.add_column("Total", justify="right", style="bold")
     table.add_column("t/s", justify="right")
+    table.add_column("out/s", justify="right")
     table.add_column("Cost", justify="right", style="green")
     table.add_column("$/h", justify="right")
 
@@ -485,7 +516,7 @@ def build_table(
             Text("no sessions in window (hook not installed? start a "
                  "Claude Code session, or run `--install-hook`)",
                  style="dim italic"),
-            "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "", "",
         )
         return table
 
@@ -495,6 +526,7 @@ def build_table(
         totals = s.totals_since(scope_cutoff) if scope_cutoff else s.totals()
         age = now - (s.effective_last_ts() or now)
         vel = s.velocity(velocity_window, now)
+        out_vel = s.output_velocity(velocity_window, now)
 
         # Prefer hook values for Input/Output (accurate cumulative totals).
         # Fall back to JSONL-derived values when no hook data is available yet.
@@ -536,6 +568,7 @@ def build_table(
             _fmt_tokens(totals.cache_read),
             _fmt_tokens(row_total),
             _fmt_velocity(vel),
+            _fmt_output_velocity(out_vel),
             cost_txt,
             cvel_txt,
         )
@@ -551,7 +584,7 @@ def build_table(
         Text(f"{len(sessions)} session(s)", style="dim"),
         "", "", "", "",
         Text(_fmt_tokens(grand_total_tokens), style="bold white on dark_cyan"),
-        "",
+        "", "",
         cost_cell,
         "",
     )
@@ -595,7 +628,10 @@ def build_layout(
     footer = Text(
         "● hook installed (accurate cost + tokens)   "
         "○ JSONL-only (approximate: streaming placeholders)   "
-        "install hook: --install-hook",
+        "install hook: --install-hook\n"
+        "t/s = total throughput incl. cache   "
+        "out/s = generation rate (output tokens only)   "
+        "$/h = cost rate (red = burning money)",
         style="dim italic",
     )
 
@@ -604,7 +640,7 @@ def build_layout(
         Layout(Align.center(header), name="header", size=1),
         Layout(name="active"),
         Layout(name="daily"),
-        Layout(Align.center(footer), name="footer", size=2),
+        Layout(Align.center(footer), name="footer", size=3),
     )
     layout["active"].update(Panel(active_tbl, border_style="green"))
     layout["daily"].update(Panel(daily_tbl, border_style="blue"))
