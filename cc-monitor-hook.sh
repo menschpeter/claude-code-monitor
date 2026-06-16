@@ -66,12 +66,17 @@ model=$(printf '%s' "$INPUT" | jq -r '.model.display_name // .model.id // "?"')
 cost_usd=$(printf '%s' "$INPUT" | jq -r '.cost.total_cost_usd // 0')
 duration_ms=$(printf '%s' "$INPUT" | jq -r '.cost.total_duration_ms // 0')
 
+# NOTE: as of Claude Code v2.1.132 context_window.total_input_tokens /
+# total_output_tokens are *current context-window occupancy* (from the most
+# recent API response), not cumulative session totals. The TUI treats them as
+# a live gauge (its "Ctx" column) and derives cumulative Input/Output from the
+# JSONL transcript instead. We still snapshot them for the gauge.
 ctx_pct=$(printf '%s' "$INPUT" | jq -r '.context_window.used_percentage // 0')
-ctx_in=$(printf '%s' "$INPUT" | jq -r '.context_window.total_input_tokens // 0')
-ctx_out=$(printf '%s' "$INPUT" | jq -r '.context_window.total_output_tokens // 0')
 
 rl5_pct=$(printf '%s' "$INPUT" | jq -r '.rate_limits.five_hour.used_percentage // 0')
 rl5_reset=$(printf '%s' "$INPUT" | jq -r '.rate_limits.five_hour.resets_at // 0')
+rl7_pct=$(printf '%s' "$INPUT" | jq -r '.rate_limits.seven_day.used_percentage // 0')
+rl7_reset=$(printf '%s' "$INPUT" | jq -r '.rate_limits.seven_day.resets_at // 0')
 
 now_ts=$(date +%s)
 
@@ -100,6 +105,7 @@ if [ -n "$session_id" ]; then
           used_percentage: (.context_window.used_percentage // 0),
           total_input_tokens: (.context_window.total_input_tokens // 0),
           total_output_tokens: (.context_window.total_output_tokens // 0),
+          context_window_size: (.context_window.context_window_size // 0),
           cache_read_input_tokens: (.context_window.cache_read_input_tokens // 0),
           cache_creation_input_tokens: (.context_window.cache_creation_input_tokens // 0)
         },
@@ -154,6 +160,17 @@ if [ "$rl5_reset" != "0" ] && [ "$rl5_reset" != "null" ]; then
   fi
 fi
 
+# 7d (weekly) reset countdown — new in CC 2.1.132, Claude.ai Pro/Max only.
+rl7_str=""
+if [ "$rl7_reset" != "0" ] && [ "$rl7_reset" != "null" ]; then
+  remaining7=$(( rl7_reset - now_ts ))
+  if [ "$remaining7" -gt 0 ]; then
+    d=$(( remaining7 / 86400 ))
+    h7=$(( (remaining7 % 86400) / 3600 ))
+    rl7_str=" ${C_DIM}│${C_RESET} 7d ${rl7_pct%.*}% (${d}d${h7}h)"
+  fi
+fi
+
 # Note: rl5_str uses a single % because printf's %b expands escapes but
 # does not interpret format specifiers — the literal % passes through.
 
@@ -166,6 +183,6 @@ printf '%s%s%s %s│%s %s%s%s %s│%s ctx %s%s%%%s %s│%s %s%s%s%b\n' \
   "$ctx_color" "$ctx_int" "$C_RESET" \
   "$C_DIM" "$C_RESET" \
   "$C_GREEN" "$cost_fmt" "$C_RESET" \
-  "$rl5_str"
+  "${rl5_str}${rl7_str}"
 
 exit 0

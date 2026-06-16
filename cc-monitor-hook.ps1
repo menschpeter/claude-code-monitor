@@ -100,14 +100,20 @@ $model       = if ((Get-SafeValue $payload @("model","display_name")) -ne $null)
 $cost_usd    = Get-SafeValue $payload @("cost","total_cost_usd")    -Default 0
 $duration_ms = Get-SafeValue $payload @("cost","total_duration_ms") -Default 0
 
+# NOTE: as of Claude Code v2.1.132 total_input_tokens / total_output_tokens are
+# *current context-window occupancy*, not cumulative session totals. The TUI
+# treats them as a live gauge and derives cumulative Input/Output from JSONL.
 $ctx_pct     = Get-SafeValue $payload @("context_window","used_percentage")        -Default 0
 $ctx_in      = Get-SafeValue $payload @("context_window","total_input_tokens")     -Default 0
 $ctx_out     = Get-SafeValue $payload @("context_window","total_output_tokens")    -Default 0
+$ctx_size    = Get-SafeValue $payload @("context_window","context_window_size")    -Default 0
 $cache_read  = Get-SafeValue $payload @("context_window","cache_read_input_tokens")      -Default 0
 $cache_create = Get-SafeValue $payload @("context_window","cache_creation_input_tokens") -Default 0
 
 $rl5_pct     = Get-SafeValue $payload @("rate_limits","five_hour","used_percentage") -Default 0
 $rl5_reset   = Get-SafeValue $payload @("rate_limits","five_hour","resets_at")       -Default 0
+$rl7_pct     = Get-SafeValue $payload @("rate_limits","seven_day","used_percentage") -Default 0
+$rl7_reset   = Get-SafeValue $payload @("rate_limits","seven_day","resets_at")       -Default 0
 
 $now_ts = [int][System.DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 
@@ -133,6 +139,7 @@ if (![string]::IsNullOrWhiteSpace($session_id)) {
             used_percentage              = [double]$ctx_pct
             total_input_tokens           = [int]$ctx_in
             total_output_tokens          = [int]$ctx_out
+            context_window_size          = [int]$ctx_size
             cache_read_input_tokens      = [int]$cache_read
             cache_creation_input_tokens  = [int]$cache_create
         }
@@ -189,8 +196,20 @@ if ($rl5_reset -ne 0 -and $rl5_reset -ne "null" -and $null -ne $rl5_reset) {
     }
 }
 
+# 7-day (weekly) reset countdown — new in CC 2.1.132, Claude.ai Pro/Max only.
+$rl7_str = ""
+if ($rl7_reset -ne 0 -and $rl7_reset -ne "null" -and $null -ne $rl7_reset) {
+    $remaining7 = [int]$rl7_reset - $now_ts
+    if ($remaining7 -gt 0) {
+        $d = [int][Math]::Floor($remaining7 / 86400)
+        $h7 = [int][Math]::Floor(($remaining7 % 86400) / 3600)
+        $rl7_pct_int = [int][Math]::Floor([double]$rl7_pct)
+        $rl7_str = " ${DIM}|${RESET} 7d ${rl7_pct_int}% (${d}d${h7}h)"
+    }
+}
+
 # Emit the single-line statusline.  Claude Code uses only the first line.
-$line = "${CYAN}${folder}${RESET} ${DIM}|${RESET} ${DIM}${model}${RESET} ${DIM}|${RESET} ctx ${ctx_color}${ctx_int}%${RESET} ${DIM}|${RESET} ${GREEN}${cost_fmt}${RESET}${rl5_str}"
+$line = "${CYAN}${folder}${RESET} ${DIM}|${RESET} ${DIM}${model}${RESET} ${DIM}|${RESET} ctx ${ctx_color}${ctx_int}%${RESET} ${DIM}|${RESET} ${GREEN}${cost_fmt}${RESET}${rl5_str}${rl7_str}"
 Write-Host $line
 
 exit 0

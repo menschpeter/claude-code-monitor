@@ -29,7 +29,9 @@ A three-piece tool for observing Claude Code token usage and cost in real time:
 echo '{"session_id":"test", ...}' | ./cc-monitor-hook.sh
 ```
 
-There is no build step and no lint config. Unit tests (covering `cc_history.py` only):
+There is no build step and no lint config. Unit tests cover `cc_history.py`, the
+`install_hook()` logic in `cc-session-monitor.py` (`test_install_hook.py`), and the
+TUI's context-window handling (`test_tui_context.py`):
 
 ```bash
 ./.venv/bin/pytest tests/ -v
@@ -37,9 +39,11 @@ There is no build step and no lint config. Unit tests (covering `cc_history.py` 
 
 ## Architecture
 
-**Data flow.** Claude Code invokes `cc-monitor-hook.sh` on every message turn and pipes a JSON payload (session_id, model, cost, context_window, rate_limits) into it on stdin. The hook (a) prints one colored status line to stdout for the status bar, and (b) writes `~/.claude/session-monitor/snapshots/<session_id>.json` via a `mv(1)` rename for atomicity. The TUI separately tails `~/.claude/projects/*/<session_id>.jsonl` transcript files AND reads those snapshots, merges both sources per session, and renders two tables: an "Active" window (last 15 min) and a calendar-day "Today" window (reset at local midnight, consistent with `cc_history.py`'s per-day persistence). Anthropic's own 5h rate-limit reset is shown in the status bar via `rate_limits.five_hour` and is independent of the TUI's window constants.
+**Data flow.** Claude Code invokes `cc-monitor-hook.sh` on every message turn and pipes a JSON payload (session_id, model, cost, context_window, rate_limits) into it on stdin. The hook (a) prints one colored status line to stdout for the status bar, and (b) writes `~/.claude/session-monitor/snapshots/<session_id>.json` via a `mv(1)` rename for atomicity. The TUI separately tails `~/.claude/projects/*/<session_id>.jsonl` transcript files AND reads those snapshots, merges both sources per session, and renders two tables: an "Active" window (last 15 min) and a calendar-day "Today" window (reset at local midnight, consistent with `cc_history.py`'s per-day persistence). Anthropic's 5h and 7d rate-limit resets are shown in the status bar via `rate_limits.five_hour` / `rate_limits.seven_day` (the latter is new in CC 2.1.132, Claude.ai Pro/Max only) and are independent of the TUI's window constants.
 
-**Why the hook exists — critical invariant.** The `input_tokens` and `output_tokens` fields in Claude Code's JSONL transcripts are streaming placeholders; they undercount real billed usage and get duplicated across streaming chunks. The hook's snapshot is the *only* source of accurate `total_cost_usd` and `context_window` totals. In `build_table` (cc-session-monitor.py) hook-backed values always take precedence over JSONL values for Input/Output; rows are marked `●` (hook) vs `○` (JSONL-only) in the TUI to make this visible. Cache token fields *are* accurate in the JSONL and come from there.
+**Why the hook exists — critical invariant.** The `input_tokens` and `output_tokens` fields in Claude Code's JSONL transcripts are streaming placeholders; they undercount real billed usage and get duplicated across streaming chunks. The hook's snapshot is the *only* source of accurate cumulative `total_cost_usd` — that is the load-bearing reason the hook exists. Cache token fields *are* accurate in the JSONL and come from there. Cumulative Input/Output come from the JSONL merge (approximate but monotonic). Rows are marked `●` (hook snapshot present → Cost + live Ctx gauge available) vs `○` (JSONL-only) in the TUI.
+
+**Context-window semantics — changed in CC v2.1.132.** Before v2.1.132 the hook's `context_window.total_input_tokens` / `total_output_tokens` were *cumulative session totals* and `build_table` preferred them for the Input/Output columns. As of v2.1.132 they report *current context-window occupancy* (from the most recent API response) — they rise and fall (e.g. drop after `/compact`). The TUI therefore (a) derives cumulative Input/Output/Total from JSONL only, and (b) surfaces the hook's current-window numbers in the separate **Ctx** column (`used/size`, using the new `context_window.context_window_size`). If you ever reintroduce a cumulative token field from the hook, do NOT route it back into Input/Output without confirming it is cumulative again — see `_fmt_ctx` and the Input/Output assignment in `build_table`, plus `tests/test_tui_context.py`.
 
 **Dedup strategy.** `_merge_sample` does a per-field MAX merge keyed by `requestId` (fallback: message id, then `ts:<timestamp>`). Streaming duplicates are normal — never sum raw JSONL entries; always merge-then-sum.
 
