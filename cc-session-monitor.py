@@ -16,6 +16,7 @@ For each session the monitor shows:
   • Last activity (age)
   • input / output / cache_read / cache_creation tokens (cumulative)
   • Total tokens
+  • Ctx — live context-window occupancy (used/size) from the hook snapshot
   • Velocity: tokens/second over a rolling window (default 30s)
 
 Known caveat (documented issue in Claude Code JSONL logs):
@@ -25,6 +26,12 @@ Known caveat (documented issue in Claude Code JSONL logs):
   per-requestId MAX to mitigate streaming duplicates, but absolute
   input/output numbers remain approximate. Velocity and relative trends
   between sessions are still meaningful.
+
+Note (Claude Code v2.1.132+):
+  The hook's context_window.total_input_tokens / total_output_tokens report
+  *current context-window occupancy*, not cumulative session totals, so they
+  feed the live "Ctx" gauge only — cumulative Input/Output come from JSONL.
+  The hook remains the sole accurate source of cumulative cost.
 
 Usage:
     python cc-session-monitor.py
@@ -125,12 +132,17 @@ class SessionState:
     last_ts: float | None = None
 
     # ----- hook-derived fields (None until the hook fires at least once) -----
-    # These are ACCURATE, unlike JSONL input/output placeholders.
+    # hook_cost_usd is the only ACCURATE cumulative figure here. As of Claude
+    # Code v2.1.132 the context_window token fields are *current context-window
+    # occupancy* (from the most recent API response), NOT cumulative session
+    # totals — so they drive the live "Ctx" gauge, while cumulative Input/Output
+    # come from the JSONL transcript (see build_table).
     hook_ts: float | None = None            # when the last snapshot was written
-    hook_cost_usd: float | None = None      # cost.total_cost_usd
-    hook_ctx_pct: float | None = None       # context_window.used_percentage
-    hook_ctx_input: int | None = None       # context_window.total_input_tokens
-    hook_ctx_output: int | None = None      # context_window.total_output_tokens
+    hook_cost_usd: float | None = None      # cost.total_cost_usd (cumulative)
+    hook_ctx_pct: float | None = None       # context_window.used_percentage (live)
+    hook_ctx_input: int | None = None       # context_window.total_input_tokens (live)
+    hook_ctx_output: int | None = None      # context_window.total_output_tokens (live)
+    hook_ctx_size: int | None = None        # context_window.context_window_size
     hook_model: str | None = None
     hook_cwd: str | None = None
     hook_rl5_pct: float | None = None       # 5h rate-limit %
@@ -359,6 +371,7 @@ class Monitor:
         state.hook_ctx_pct = float(ctx.get("used_percentage") or 0.0)
         state.hook_ctx_input = int(ctx.get("total_input_tokens") or 0)
         state.hook_ctx_output = int(ctx.get("total_output_tokens") or 0)
+        state.hook_ctx_size = int(ctx.get("context_window_size") or 0) or None
         state.hook_model = data.get("model") or state.hook_model
         state.hook_cwd = data.get("cwd") or state.hook_cwd
         state.hook_rl5_pct = float(rl5.get("used_percentage") or 0.0) or None
@@ -479,6 +492,22 @@ def _fmt_output_velocity(tps: float) -> Text:
     return Text(f"{tps:.1f} o/s", style="bold cyan")
 
 
+def _fmt_ctx(used: int | None, size: int | None, pct: float | None) -> Text:
+    """Live context-window occupancy from the hook snapshot.
+
+    Renders the *current* window load (not cumulative usage) as `used/size`,
+    coloured like the status bar's context gauge: green <50%, yellow <80%,
+    red otherwise. Shows "—" when no hook snapshot is available yet.
+    """
+    if used is None:
+        return Text("—", style="dim")
+    pct_val = pct or 0.0
+    color = "green" if pct_val < 50 else "yellow" if pct_val < 80 else "red"
+    if size:
+        return Text(f"{_fmt_tokens(used)}/{_fmt_tokens(size)}", style=color)
+    return Text(_fmt_tokens(used), style=color)
+
+
 def build_table(
     title: str,
     sessions: list[SessionState],
@@ -505,6 +534,7 @@ def build_table(
     table.add_column("Output", justify="right")
     table.add_column("Cache R", justify="right", style="dim")
     table.add_column("Total", justify="right", style="bold")
+    table.add_column("Ctx", justify="right")
     table.add_column("t/s", justify="right")
     table.add_column("out/s", justify="right")
     table.add_column("Cost", justify="right", style="green")
@@ -516,7 +546,7 @@ def build_table(
             Text("no sessions in window (hook not installed? start a "
                  "Claude Code session, or run `--install-hook`)",
                  style="dim italic"),
-            "", "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "", "", "",
         )
         return table
 
@@ -528,15 +558,20 @@ def build_table(
         vel = s.velocity(velocity_window, now)
         out_vel = s.output_velocity(velocity_window, now)
 
-        # Prefer hook values for Input/Output (accurate cumulative totals).
-        # Fall back to JSONL-derived values when no hook data is available yet.
-        input_tok = s.hook_ctx_input if s.hook_ctx_input is not None else totals.input_tokens
-        output_tok = s.hook_ctx_output if s.hook_ctx_output is not None else totals.output_tokens
+        # Cumulative Input/Output come from the JSONL transcript (merge-by-
+        # requestId). These undercount real billed output slightly (the JSONL
+        # fields are streaming placeholders) but they are monotonic and
+        # cumulative. The hook's context_window totals can NOT be used here:
+        # since CC v2.1.132 they report current context occupancy, not session
+        # totals — they're surfaced separately in the "Ctx" column below.
+        input_tok = totals.input_tokens
+        output_tok = totals.output_tokens
 
-        # Total: cache tokens come from JSONL (reliable there), input/output
-        # from whatever source we picked above.
+        # All four components are JSONL-cumulative, so the sum is coherent.
         row_total = input_tok + output_tok + totals.cache_read + totals.cache_creation
         grand_total_tokens += row_total
+
+        ctx_txt = _fmt_ctx(s.hook_ctx_input, s.hook_ctx_size, s.hook_ctx_pct)
 
         cost_txt = (
             Text(f"${s.hook_cost_usd:.2f}" if s.hook_cost_usd >= 1
@@ -554,7 +589,9 @@ def build_table(
             if cvel > 0 else Text("—", style="dim")
         )
 
-        # Mark rows whose numbers are hook-backed (accurate) vs JSONL-only.
+        # Mark rows with a live hook snapshot (●): their Cost, $/h and Ctx
+        # gauge are hook-backed. ○ rows are JSONL-only — no Cost/Ctx yet.
+        # Input/Output/Cache/Total are JSONL-derived for both.
         marker = "●" if s.hook_ts is not None else "○"
         marker_color = "green" if s.hook_ts is not None else "yellow"
 
@@ -567,6 +604,7 @@ def build_table(
             _fmt_tokens(output_tok),
             _fmt_tokens(totals.cache_read),
             _fmt_tokens(row_total),
+            ctx_txt,
             _fmt_velocity(vel),
             _fmt_output_velocity(out_vel),
             cost_txt,
@@ -584,7 +622,7 @@ def build_table(
         Text(f"{len(sessions)} session(s)", style="dim"),
         "", "", "", "",
         Text(_fmt_tokens(grand_total_tokens), style="bold white on dark_cyan"),
-        "", "",
+        "", "", "",
         cost_cell,
         "",
     )
@@ -626,9 +664,11 @@ def build_layout(
     )
 
     footer = Text(
-        "● hook installed (accurate cost + tokens)   "
-        "○ JSONL-only (approximate: streaming placeholders)   "
+        "● hook installed (accurate Cost + live Ctx gauge)   "
+        "○ JSONL-only (no Cost/Ctx yet)   "
         "install hook: --install-hook\n"
+        "Input/Output/Total = JSONL cumulative (streaming placeholders, slight undercount)   "
+        "Ctx = live context window used/size\n"
         "t/s = total throughput incl. cache   "
         "out/s = generation rate (output tokens only)   "
         "$/h = cost rate (red = burning money)",
