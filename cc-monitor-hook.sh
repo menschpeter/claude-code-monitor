@@ -30,8 +30,17 @@
 #          "cost":{"total_cost_usd":0.42},
 #          "context_window":{"used_percentage":15,
 #                            "total_input_tokens":1200,
-#                            "total_output_tokens":800}}' \
+#                            "total_output_tokens":800,
+#                            "context_window_size":200000,
+#                            "current_usage":{"input_tokens":200,
+#                                             "output_tokens":800,
+#                                             "cache_read_input_tokens":900,
+#                                             "cache_creation_input_tokens":100}}}' \
 #     | ~/.claude/cc-monitor-hook.sh
+#
+# NOTE on the payload shape: the per-request cache token counts live under
+# context_window.current_usage (null until the first API response), NOT flat on
+# context_window. See the statusLine schema in the Claude Code docs.
 
 set -u  # intentionally NOT -e: a broken snapshot must not kill the statusline
 
@@ -106,8 +115,8 @@ if [ -n "$session_id" ]; then
           total_input_tokens: (.context_window.total_input_tokens // 0),
           total_output_tokens: (.context_window.total_output_tokens // 0),
           context_window_size: (.context_window.context_window_size // 0),
-          cache_read_input_tokens: (.context_window.cache_read_input_tokens // 0),
-          cache_creation_input_tokens: (.context_window.cache_creation_input_tokens // 0)
+          cache_read_input_tokens: (.context_window.current_usage.cache_read_input_tokens // .context_window.cache_read_input_tokens // 0),
+          cache_creation_input_tokens: (.context_window.current_usage.cache_creation_input_tokens // .context_window.cache_creation_input_tokens // 0)
         },
         rate_limits: (.rate_limits // {}),
         version: (.version // "")

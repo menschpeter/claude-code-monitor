@@ -34,8 +34,17 @@
         "cost":{"total_cost_usd":0.42},
         "context_window":{"used_percentage":15,
                           "total_input_tokens":1200,
-                          "total_output_tokens":800}}' |
+                          "total_output_tokens":800,
+                          "context_window_size":200000,
+                          "current_usage":{"input_tokens":200,
+                                           "output_tokens":800,
+                                           "cache_read_input_tokens":900,
+                                           "cache_creation_input_tokens":100}}}' |
         powershell -NoProfile -NonInteractive -File .\cc-monitor-hook.ps1
+
+    NOTE on the payload shape: the per-request cache token counts live under
+    context_window.current_usage (null until the first API response), NOT flat
+    on context_window. See the statusLine schema in the Claude Code docs.
 #>
 
 # Do NOT use Set-StrictMode -Version Latest here: a broken snapshot must never
@@ -107,8 +116,13 @@ $ctx_pct     = Get-SafeValue $payload @("context_window","used_percentage")     
 $ctx_in      = Get-SafeValue $payload @("context_window","total_input_tokens")     -Default 0
 $ctx_out     = Get-SafeValue $payload @("context_window","total_output_tokens")    -Default 0
 $ctx_size    = Get-SafeValue $payload @("context_window","context_window_size")    -Default 0
-$cache_read  = Get-SafeValue $payload @("context_window","cache_read_input_tokens")      -Default 0
-$cache_create = Get-SafeValue $payload @("context_window","cache_creation_input_tokens") -Default 0
+# Cache tokens live under context_window.current_usage (see the payload schema
+# in the header). current_usage is null until the first API response, and the
+# flat context_window.* path is kept as a fallback for older Claude Code builds.
+$cache_read  = Get-SafeValue $payload @("context_window","current_usage","cache_read_input_tokens") -Default $null
+if ($null -eq $cache_read)  { $cache_read  = Get-SafeValue $payload @("context_window","cache_read_input_tokens") -Default 0 }
+$cache_create = Get-SafeValue $payload @("context_window","current_usage","cache_creation_input_tokens") -Default $null
+if ($null -eq $cache_create) { $cache_create = Get-SafeValue $payload @("context_window","cache_creation_input_tokens") -Default 0 }
 
 $rl5_pct     = Get-SafeValue $payload @("rate_limits","five_hour","used_percentage") -Default 0
 $rl5_reset   = Get-SafeValue $payload @("rate_limits","five_hour","resets_at")       -Default 0
