@@ -72,11 +72,13 @@ Empty session list returns `None`.
 
 ### 5. Footer rendering in `build_layout`
 
-The footer grows from `size=3` to `size=4`. The new line joins the existing legend block in the same `dim italic` style:
+The footer grows from `size=3` to `size=4`. The new line is placed **first**, ahead of the three existing legend lines, in the same `dim italic` style:
 
 ```
 effort: high  (2e2615e8, most recent)
 ```
+
+It goes first rather than after the legend because `size=len(footer_lines)` counts logical lines while rich wraps long ones at narrower terminal widths — a wrapped legend line eats into the footer pane's fixed row budget and clips whichever line is last. Putting the highest-value line first means it survives that clipping instead of the legend. (This ordering was corrected post-ship by the final review; the original implementation appended the line after the legend.)
 
 The session ID is the same 8-character prefix the Session column already shows. English, consistent with the rest of the footer.
 

@@ -1,18 +1,26 @@
-"""Tests for the TUI's context-window handling (CC v2.1.132+ semantics).
+"""Tests for the TUI's context-window handling (CC v2.1.132+ semantics) and
+the effort-level footer line.
 
 As of Claude Code v2.1.132 the hook's context_window.total_input_tokens /
 total_output_tokens report *current context-window occupancy*, not cumulative
 session totals. The monitor must therefore:
   * derive cumulative Input/Output from the JSONL transcript (merge-by-id), and
   * surface the hook's current-window numbers in the separate "Ctx" column.
+
+This file also covers `SessionState.effort`, `_fmt_effort_footer`, and the
+footer's rendered layout, including at fixed terminal widths (see the
+render-through-a-Console tests near the bottom).
 """
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import sys
 import time
 from pathlib import Path
+
+from rich.console import Console
 
 
 def _load_monitor_module():
@@ -320,3 +328,50 @@ def test_build_layout_footer_keeps_existing_legend(tmp_path):
     assert "hook installed" in text
     assert "$/h = cost rate" in text
     assert "effort: high" in text
+
+
+# ---------------------------------------------------------------------------
+# footer at fixed terminal widths — regression for the clipping bug
+#
+# `layout.split_column(..., size=len(footer_lines))` counts *logical* lines,
+# but rich wraps long ones. The legend lines are long enough (134 / 133 chars)
+# to wrap at narrower widths, which consumes the footer pane's fixed row
+# budget and clips whatever line is *last*. Inspecting the `Text` object (as
+# the other footer tests above do) can't catch this — it only shows up once
+# the layout is actually rendered through a Console at a real width.
+# ---------------------------------------------------------------------------
+
+def _render_layout(layout, width: int) -> str:
+    """Plain text of a Layout rendered through a fixed-width Console."""
+    console = Console(file=io.StringIO(), width=width, height=50, no_color=True)
+    console.print(layout)
+    return console.file.getvalue()
+
+
+def test_footer_effort_line_survives_narrow_width(tmp_path):
+    """At width=120 the legend wraps; the effort line must still render.
+
+    This is the width the final review measured as broken (line clipped)
+    before the fix that puts the effort line first in `footer_lines`.
+    """
+    m = _load_monitor_module()
+    mon = m.Monitor(root=tmp_path / "projects", snapshot_dir=tmp_path / "snaps")
+    state = _state_with(m, "cccccccc3333", time.time(), "xhigh")
+    mon.sessions[state.session_id] = state
+
+    rendered = _render_layout(m.build_layout(mon, velocity_window=30), width=120)
+
+    assert "effort: xhigh" in rendered
+
+
+def test_footer_effort_line_survives_wide_width(tmp_path):
+    """At a wide width (200) nothing wraps, so this must pass regardless of
+    ordering — it pins the non-clipped case alongside the narrow one above."""
+    m = _load_monitor_module()
+    mon = m.Monitor(root=tmp_path / "projects", snapshot_dir=tmp_path / "snaps")
+    state = _state_with(m, "cccccccc3333", time.time(), "xhigh")
+    mon.sessions[state.session_id] = state
+
+    rendered = _render_layout(m.build_layout(mon, velocity_window=30), width=200)
+
+    assert "effort: xhigh" in rendered

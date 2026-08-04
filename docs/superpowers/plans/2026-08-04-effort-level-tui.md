@@ -1,5 +1,7 @@
 # Effort Level in the TUI Footer — Implementation Plan
 
+**Executed in `6625032..5c49594`.** All tasks below shipped; checkboxes are left unticked as the historical record of the plan as written, not as a to-do list.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Show the reasoning effort level of the most recently active session in the monitor's TUI footer, so a high `$/h` can be read together with the setting that drives it.
@@ -534,6 +536,8 @@ In `build_layout`, replace the existing footer construction (currently a single 
     footer = Text("\n".join(footer_lines), style="dim italic")
 ```
 
+**Post-ship correction:** the final review found that appending the effort line last made it the row clipped by rich's line-wrapping below ~130 terminal columns (`size=len(footer_lines)` counts logical lines, but a wrapped legend line consumes extra rendered rows from the same fixed budget). The shipped code instead prepends the effort line — built first, then the three legend lines appended after it — so the highest-value line survives clipping. `size=len(footer_lines)` did not need to change. See `cc-session-monitor.py`'s footer construction in `build_layout` for the current code, and `tests/test_tui_context.py`'s width-120/width-200 render tests for the regression coverage.
+
 And in the `layout.split_column(...)` call, derive the footer size from the line count instead of hard-coding `3`:
 
 ```python
@@ -569,6 +573,8 @@ It is scoped to one session — the one with the newest activity, named by its s
 
 The value is read from the JSONL transcript, so it reflects the effort **used for the last request** rather than the level currently configured. Change the level with no follow-up request and the line keeps showing the previous value until the next assistant turn. This also means it works for `○`-marked (JSONL-only) sessions, not just hook-backed ones.
 ````
+
+**Post-ship correction:** the "Below the legend" placement above is what Step 5 originally asked for. The final review's reorder fix (see Step 3's correction note) moved the line to be *first* in the footer, ahead of the legend, so the shipped `README.md` wording says "ahead of the legend lines" instead. Current wording lives in `README.md`'s "Effort line" section.
 
 - [ ] **Step 6: Document in CLAUDE.md**
 

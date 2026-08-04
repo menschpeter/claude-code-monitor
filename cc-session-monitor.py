@@ -274,6 +274,7 @@ class Monitor:
                 state.output_velocity_points.clear()
                 state.first_ts = None
                 state.last_ts = None
+                state.effort = None
 
             state.file_size = size
 
@@ -293,6 +294,13 @@ class Monitor:
 
                 # Before the usage guard below: an assistant entry without a
                 # usage block still tells us the session's effort level.
+                #
+                # The `if effort:` guard is load-bearing, not redundant: it
+                # keeps non-assistant entries (which yield None) from
+                # blanking a previously-seen value, and — per live-transcript
+                # analysis — assigning unconditionally would make the footer
+                # line flicker off on every `<synthetic>` interrupt entry.
+                # Do not simplify this to an unconditional assignment.
                 effort = _extract_effort(entry)
                 if effort:
                     state.effort = effort
@@ -702,7 +710,16 @@ def build_layout(
         ("Ctrl-C to quit", "dim"),
     )
 
-    footer_lines = [
+    # Effort goes first: `size=len(footer_lines)` below counts logical lines,
+    # but rich wraps the long legend lines at narrower terminal widths, which
+    # eats into the footer pane's fixed row budget and clips whichever line
+    # is last. Putting the highest-value line first means it survives that
+    # clipping instead of the legend.
+    footer_lines = []
+    effort_line = _fmt_effort_footer(active)
+    if effort_line:
+        footer_lines.append(effort_line)
+    footer_lines.extend([
         "● hook installed (accurate Cost + live Ctx gauge)   "
         "○ JSONL-only (no Cost/Ctx yet)   "
         "install hook: --install-hook",
@@ -711,10 +728,7 @@ def build_layout(
         "t/s = total throughput incl. cache   "
         "out/s = generation rate (output tokens only)   "
         "$/h = cost rate (red = burning money)",
-    ]
-    effort_line = _fmt_effort_footer(active)
-    if effort_line:
-        footer_lines.append(effort_line)
+    ])
 
     footer = Text("\n".join(footer_lines), style="dim italic")
 
