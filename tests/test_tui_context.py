@@ -208,3 +208,67 @@ def test_refresh_leaves_effort_none_when_jsonl_has_no_effort(tmp_path):
     mon.refresh()
 
     assert mon.sessions["sess9999zzzz"].effort is None
+
+
+# ---------------------------------------------------------------------------
+# _fmt_effort_footer
+# ---------------------------------------------------------------------------
+
+def _state_with(m, session_id: str, last_ts: float, effort: str | None):
+    state = m.SessionState(session_id=session_id, project="proj",
+                           jsonl_path=Path(f"/tmp/{session_id}.jsonl"))
+    state.first_ts = last_ts
+    state.last_ts = last_ts
+    state.effort = effort
+    return state
+
+
+def test_fmt_effort_footer_picks_newest_session():
+    m = _load_monitor_module()
+    older = _state_with(m, "aaaaaaaa1111", 100.0, "medium")
+    newer = _state_with(m, "bbbbbbbb2222", 200.0, "xhigh")
+
+    line = m._fmt_effort_footer([older, newer])
+
+    assert line is not None
+    assert "xhigh" in line
+    assert "bbbbbbbb" in line
+    assert "medium" not in line
+    assert "aaaaaaaa" not in line
+
+
+def test_fmt_effort_footer_none_when_newest_lacks_effort():
+    """No fall-through: the line names one session, so it must be that one."""
+    m = _load_monitor_module()
+    older = _state_with(m, "aaaaaaaa1111", 100.0, "high")
+    newer = _state_with(m, "bbbbbbbb2222", 200.0, None)
+
+    assert m._fmt_effort_footer([older, newer]) is None
+
+
+def test_fmt_effort_footer_none_for_empty_list():
+    m = _load_monitor_module()
+    assert m._fmt_effort_footer([]) is None
+
+
+def test_fmt_effort_footer_skips_sessions_without_last_ts():
+    m = _load_monitor_module()
+    no_ts = _state_with(m, "cccccccc3333", 0.0, "max")
+    no_ts.last_ts = None
+    real = _state_with(m, "dddddddd4444", 50.0, "low")
+
+    line = m._fmt_effort_footer([no_ts, real])
+
+    assert line is not None
+    assert "low" in line
+    assert "dddddddd" in line
+
+
+def test_fmt_effort_footer_uses_eight_char_session_prefix():
+    m = _load_monitor_module()
+    state = _state_with(m, "0123456789abcdef", 10.0, "high")
+
+    line = m._fmt_effort_footer([state])
+
+    assert "01234567" in line
+    assert "89abcdef" not in line

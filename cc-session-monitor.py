@@ -521,6 +521,32 @@ def _fmt_ctx(used: int | None, size: int | None, pct: float | None) -> Text:
     return Text(_fmt_tokens(used), style=color)
 
 
+def _fmt_effort_footer(sessions: list[SessionState]) -> str | None:
+    """Footer line naming the reasoning effort of the most recent session.
+
+    Scoped to a single session on purpose: effort is a per-session setting, so
+    one unlabelled value spanning differing sessions would be ambiguous — hence
+    the session-ID annotation.
+
+    Returns None when the newest session has no effort level (its model does not
+    support one, or it has not produced an assistant turn yet). Falling through
+    to an older session would print a value that does not belong to the session
+    the line names.
+
+    Effort is informational, so the caller renders it in the footer's neutral
+    dim italic — no threshold colouring, which is reserved for `$/h`.
+    """
+    newest: SessionState | None = None
+    for state in sessions:
+        if state.last_ts is None:
+            continue
+        if newest is None or state.last_ts > newest.last_ts:
+            newest = state
+    if newest is None or not newest.effort:
+        return None
+    return f"effort: {newest.effort}  ({newest.session_id[:8]}, most recent)"
+
+
 def build_table(
     title: str,
     sessions: list[SessionState],
