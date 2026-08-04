@@ -75,6 +75,7 @@ from cc_history import (
     UsageSample,
     parse_ts as _parse_ts,
     extract_usage as _extract_usage,
+    extract_effort as _extract_effort,
     merge_sample as _merge_sample,
     humanize_project as _humanize_project,
 )
@@ -147,6 +148,12 @@ class SessionState:
     hook_cwd: str | None = None
     hook_rl5_pct: float | None = None       # 5h rate-limit %
     hook_rl5_reset: int | None = None       # epoch seconds
+
+    # ----- JSONL-derived session settings -----
+    # Reasoning effort of the newest `assistant` entry. Deliberately NOT a
+    # field on UsageSample: _merge_sample does a per-field MAX merge, and MAX
+    # has no meaningful semantics for a string.
+    effort: str | None = None
 
     # rolling history of (ts, cost_usd) for $/h velocity
     cost_points: deque = field(default_factory=lambda: deque(maxlen=500))
@@ -283,6 +290,12 @@ class Monitor:
                     entry = json.loads(raw)
                 except json.JSONDecodeError:
                     continue
+
+                # Before the usage guard below: an assistant entry without a
+                # usage block still tells us the session's effort level.
+                effort = _extract_effort(entry)
+                if effort:
+                    state.effort = effort
 
                 req_id, sample = _extract_usage(entry)
                 if sample is None:

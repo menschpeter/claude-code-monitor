@@ -9,6 +9,7 @@ session totals. The monitor must therefore:
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import time
 from pathlib import Path
@@ -137,3 +138,73 @@ def test_build_table_ctx_dash_when_no_hook():
 
     table = m.build_table("t", [state], now, velocity_window=30)
     assert _cells(table, 7)[0] == "—"
+
+
+# ---------------------------------------------------------------------------
+# SessionState.effort — captured from the JSONL during refresh
+# ---------------------------------------------------------------------------
+
+def _write_jsonl(path: Path, entries: list[dict]) -> None:
+    path.write_text("".join(json.dumps(e) + "\n" for e in entries))
+
+
+def _assistant(effort: str | None, ts: str, req_id: str, with_usage: bool = True) -> dict:
+    entry: dict = {"type": "assistant", "timestamp": ts, "requestId": req_id}
+    if effort is not None:
+        entry["effort"] = effort
+    if with_usage:
+        entry["message"] = {
+            "id": req_id,
+            "usage": {"input_tokens": 10, "output_tokens": 5,
+                      "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+        }
+    return entry
+
+
+def test_refresh_captures_effort_from_newest_assistant_line(tmp_path):
+    m = _load_monitor_module()
+    proj = tmp_path / "projects" / "-Users-x-myproj"
+    proj.mkdir(parents=True)
+    _write_jsonl(proj / "sess1234abcd.jsonl", [
+        _assistant("medium", "2026-08-04T10:00:00Z", "r1"),
+        _assistant("xhigh", "2026-08-04T10:05:00Z", "r2"),
+    ])
+
+    mon = m.Monitor(root=tmp_path / "projects", snapshot_dir=tmp_path / "snaps")
+    mon.refresh()
+
+    assert mon.sessions["sess1234abcd"].effort == "xhigh"
+
+
+def test_refresh_captures_effort_from_entry_without_usage(tmp_path):
+    """An assistant entry with no usage block must still contribute its effort.
+
+    This pins the call site *before* the `if sample is None: continue` guard in
+    the refresh loop.
+    """
+    m = _load_monitor_module()
+    proj = tmp_path / "projects" / "-Users-x-myproj"
+    proj.mkdir(parents=True)
+    _write_jsonl(proj / "sess5678efgh.jsonl", [
+        _assistant("medium", "2026-08-04T10:00:00Z", "r1"),
+        _assistant("max", "2026-08-04T10:05:00Z", "r2", with_usage=False),
+    ])
+
+    mon = m.Monitor(root=tmp_path / "projects", snapshot_dir=tmp_path / "snaps")
+    mon.refresh()
+
+    assert mon.sessions["sess5678efgh"].effort == "max"
+
+
+def test_refresh_leaves_effort_none_when_jsonl_has_no_effort(tmp_path):
+    m = _load_monitor_module()
+    proj = tmp_path / "projects" / "-Users-x-myproj"
+    proj.mkdir(parents=True)
+    _write_jsonl(proj / "sess9999zzzz.jsonl", [
+        _assistant(None, "2026-08-04T10:00:00Z", "r1"),
+    ])
+
+    mon = m.Monitor(root=tmp_path / "projects", snapshot_dir=tmp_path / "snaps")
+    mon.refresh()
+
+    assert mon.sessions["sess9999zzzz"].effort is None
