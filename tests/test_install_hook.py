@@ -62,6 +62,33 @@ def test_install_hook_writes_hook_and_settings(fake_home, monkeypatch):
     assert '"command": "' in settings_path.read_text()
 
 
+def test_install_hook_preserves_non_ascii_settings(fake_home, monkeypatch):
+    """Unrelated non-ASCII entries survive the settings.json round-trip verbatim.
+
+    install_hook rewrites the whole file, so a German statusMessage from some
+    other hook must come back as-is rather than as \\uXXXX escapes.
+    """
+    monitor = _load_monitor_module()
+    claude_dir = fake_home / ".claude"
+    claude_dir.mkdir()
+    settings_path = claude_dir / "settings.json"
+    settings_path.write_text(
+        json.dumps({"hooks": {"statusMessage": "Prüfe Kalibrierung – 日本語"}}, ensure_ascii=False)
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rc = monitor.install_hook()
+
+    assert rc == 0
+    raw = settings_path.read_text(encoding="utf-8")
+    assert "Prüfe Kalibrierung – 日本語" in raw
+    assert "\\u" not in raw
+    # ...and the untouched entry is still semantically intact.
+    reloaded = json.loads(raw)
+    assert reloaded["hooks"]["statusMessage"] == "Prüfe Kalibrierung – 日本語"
+
+
 # ---------------------------------------------------------------------------
 # Platform-specific install behaviour
 # ---------------------------------------------------------------------------

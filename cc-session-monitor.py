@@ -734,7 +734,7 @@ def install_hook() -> int:
     settings: dict = {}
     if settings_path.exists():
         try:
-            settings = json.loads(settings_path.read_text())
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             sys.stderr.write(
                 f"⚠  {settings_path} exists but is not valid JSON. "
@@ -771,7 +771,14 @@ def install_hook() -> int:
         "command": command,
         "padding": 0,
     }
-    settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+    # ensure_ascii=False so unrelated non-ASCII settings entries (e.g. a hook's
+    # German statusMessage) survive the round-trip verbatim instead of being
+    # rewritten as \uXXXX escapes. Explicit utf-8 because Python would otherwise
+    # use the locale encoding on Windows and blow up on non-cp1252 characters.
+    settings_path.write_text(
+        json.dumps(settings, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
 
     print(f"✓ Installed hook to  {dest}")
     print(f"✓ Updated            {settings_path}")
