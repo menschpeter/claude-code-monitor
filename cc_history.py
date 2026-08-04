@@ -74,6 +74,25 @@ def extract_usage(entry: dict) -> tuple[str | None, "UsageSample | None"]:
     )
 
 
+def extract_effort(entry: dict) -> str | None:
+    """Pull the reasoning effort level out of one JSONL line, or None.
+
+    Claude Code writes a flat `effort` string (e.g. "high", "xhigh") on
+    `assistant` entries, reflecting the effort used for that request — so the
+    newest assistant entry carries the session's current level.
+
+    The isinstance guard is deliberate: the statusLine payload nests the same
+    information as {"level": ...}, and if the JSONL ever switches to that shape
+    we want to fail closed rather than render a dict into the UI.
+    """
+    if entry.get("type") != "assistant":
+        return None
+    effort = entry.get("effort")
+    if isinstance(effort, str) and effort:
+        return effort
+    return None
+
+
 def merge_sample(
     existing: "UsageSample | None", new: "UsageSample",
 ) -> "UsageSample":

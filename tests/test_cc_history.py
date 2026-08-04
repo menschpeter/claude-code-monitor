@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from cc_history import DailyRecord, DailySessionEntry, HistoryLogger
+from cc_history import DailyRecord, DailySessionEntry, HistoryLogger, extract_effort
 from datetime import date as date_cls
 
 
@@ -477,3 +477,27 @@ def test_reconstruct_skips_existing_reconstructed_file(tmp_path):
     assert rec["reconstructed"] is True
     assert rec["generated_at"] == 7.0   # untouched
     assert rec["sessions"] == {}
+
+
+def test_extract_effort_returns_level_from_assistant_entry():
+    assert extract_effort({"type": "assistant", "effort": "xhigh"}) == "xhigh"
+
+
+def test_extract_effort_none_when_field_absent():
+    assert extract_effort({"type": "assistant", "message": {"usage": {}}}) is None
+
+
+def test_extract_effort_none_for_non_assistant_types():
+    for entry_type in ("user", "mode", "attachment", "file-history-snapshot"):
+        entry = {"type": entry_type, "effort": "high"}
+        assert extract_effort(entry) is None, entry_type
+
+
+def test_extract_effort_none_for_empty_string():
+    assert extract_effort({"type": "assistant", "effort": ""}) is None
+
+
+def test_extract_effort_none_for_non_string_effort():
+    # The statusLine payload nests this as {"level": "high"}. If the JSONL ever
+    # adopts that shape we want None rather than a dict rendered into the footer.
+    assert extract_effort({"type": "assistant", "effort": {"level": "high"}}) is None
