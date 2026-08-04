@@ -1,17 +1,26 @@
-"""Tests for the TUI's context-window handling (CC v2.1.132+ semantics).
+"""Tests for the TUI's context-window handling (CC v2.1.132+ semantics) and
+the effort-level footer line.
 
 As of Claude Code v2.1.132 the hook's context_window.total_input_tokens /
 total_output_tokens report *current context-window occupancy*, not cumulative
 session totals. The monitor must therefore:
   * derive cumulative Input/Output from the JSONL transcript (merge-by-id), and
   * surface the hook's current-window numbers in the separate "Ctx" column.
+
+This file also covers `SessionState.effort`, `_fmt_effort_footer`, and the
+footer's rendered layout, including at fixed terminal widths (see the
+render-through-a-Console tests near the bottom).
 """
 from __future__ import annotations
 
 import importlib.util
+import io
+import json
 import sys
 import time
 from pathlib import Path
+
+from rich.console import Console
 
 
 def _load_monitor_module():
@@ -137,3 +146,232 @@ def test_build_table_ctx_dash_when_no_hook():
 
     table = m.build_table("t", [state], now, velocity_window=30)
     assert _cells(table, 7)[0] == "—"
+
+
+# ---------------------------------------------------------------------------
+# SessionState.effort — captured from the JSONL during refresh
+# ---------------------------------------------------------------------------
+
+def _write_jsonl(path: Path, entries: list[dict]) -> None:
+    path.write_text("".join(json.dumps(e) + "\n" for e in entries))
+
+
+def _assistant(effort: str | None, ts: str, req_id: str, with_usage: bool = True) -> dict:
+    entry: dict = {"type": "assistant", "timestamp": ts, "requestId": req_id}
+    if effort is not None:
+        entry["effort"] = effort
+    if with_usage:
+        entry["message"] = {
+            "id": req_id,
+            "usage": {"input_tokens": 10, "output_tokens": 5,
+                      "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+        }
+    return entry
+
+
+def test_refresh_captures_effort_from_newest_assistant_line(tmp_path):
+    m = _load_monitor_module()
+    proj = tmp_path / "projects" / "-Users-x-myproj"
+    proj.mkdir(parents=True)
+    _write_jsonl(proj / "sess1234abcd.jsonl", [
+        _assistant("medium", "2026-08-04T10:00:00Z", "r1"),
+        _assistant("xhigh", "2026-08-04T10:05:00Z", "r2"),
+    ])
+
+    mon = m.Monitor(root=tmp_path / "projects", snapshot_dir=tmp_path / "snaps")
+    mon.refresh()
+
+    assert mon.sessions["sess1234abcd"].effort == "xhigh"
+
+
+def test_refresh_captures_effort_from_entry_without_usage(tmp_path):
+    """An assistant entry with no usage block must still contribute its effort.
+
+    This pins the call site *before* the `if sample is None: continue` guard in
+    the refresh loop.
+    """
+    m = _load_monitor_module()
+    proj = tmp_path / "projects" / "-Users-x-myproj"
+    proj.mkdir(parents=True)
+    _write_jsonl(proj / "sess5678efgh.jsonl", [
+        _assistant("medium", "2026-08-04T10:00:00Z", "r1"),
+        _assistant("max", "2026-08-04T10:05:00Z", "r2", with_usage=False),
+    ])
+
+    mon = m.Monitor(root=tmp_path / "projects", snapshot_dir=tmp_path / "snaps")
+    mon.refresh()
+
+    assert mon.sessions["sess5678efgh"].effort == "max"
+
+
+def test_refresh_leaves_effort_none_when_jsonl_has_no_effort(tmp_path):
+    m = _load_monitor_module()
+    proj = tmp_path / "projects" / "-Users-x-myproj"
+    proj.mkdir(parents=True)
+    _write_jsonl(proj / "sess9999zzzz.jsonl", [
+        _assistant(None, "2026-08-04T10:00:00Z", "r1"),
+    ])
+
+    mon = m.Monitor(root=tmp_path / "projects", snapshot_dir=tmp_path / "snaps")
+    mon.refresh()
+
+    assert mon.sessions["sess9999zzzz"].effort is None
+
+
+# ---------------------------------------------------------------------------
+# _fmt_effort_footer
+# ---------------------------------------------------------------------------
+
+def _state_with(m, session_id: str, last_ts: float, effort: str | None):
+    state = m.SessionState(session_id=session_id, project="proj",
+                           jsonl_path=Path(f"/tmp/{session_id}.jsonl"))
+    state.first_ts = last_ts
+    state.last_ts = last_ts
+    state.effort = effort
+    return state
+
+
+def test_fmt_effort_footer_picks_newest_session():
+    m = _load_monitor_module()
+    older = _state_with(m, "aaaaaaaa1111", 100.0, "medium")
+    newer = _state_with(m, "bbbbbbbb2222", 200.0, "xhigh")
+
+    line = m._fmt_effort_footer([older, newer])
+
+    assert line is not None
+    assert "xhigh" in line
+    assert "bbbbbbbb" in line
+    assert "medium" not in line
+    assert "aaaaaaaa" not in line
+
+
+def test_fmt_effort_footer_none_when_newest_lacks_effort():
+    """No fall-through: the line names one session, so it must be that one."""
+    m = _load_monitor_module()
+    older = _state_with(m, "aaaaaaaa1111", 100.0, "high")
+    newer = _state_with(m, "bbbbbbbb2222", 200.0, None)
+
+    assert m._fmt_effort_footer([older, newer]) is None
+
+
+def test_fmt_effort_footer_none_for_empty_list():
+    m = _load_monitor_module()
+    assert m._fmt_effort_footer([]) is None
+
+
+def test_fmt_effort_footer_skips_sessions_without_last_ts():
+    m = _load_monitor_module()
+    no_ts = _state_with(m, "cccccccc3333", 0.0, "max")
+    no_ts.last_ts = None
+    real = _state_with(m, "dddddddd4444", 50.0, "low")
+
+    line = m._fmt_effort_footer([no_ts, real])
+
+    assert line is not None
+    assert "low" in line
+    assert "dddddddd" in line
+
+
+def test_fmt_effort_footer_uses_eight_char_session_prefix():
+    m = _load_monitor_module()
+    state = _state_with(m, "0123456789abcdef", 10.0, "high")
+
+    line = m._fmt_effort_footer([state])
+
+    assert "01234567" in line
+    assert "89abcdef" not in line
+
+
+# ---------------------------------------------------------------------------
+# build_layout: footer carries the effort line
+# ---------------------------------------------------------------------------
+
+def _footer_text(layout) -> str:
+    """Plain text of the footer pane (Layout -> Align -> Text)."""
+    return layout["footer"].renderable.renderable.plain
+
+
+def test_build_layout_footer_includes_effort_line(tmp_path):
+    m = _load_monitor_module()
+    mon = m.Monitor(root=tmp_path / "projects", snapshot_dir=tmp_path / "snaps")
+    state = _state_with(m, "cccccccc3333", time.time(), "xhigh")
+    mon.sessions[state.session_id] = state
+
+    layout = m.build_layout(mon, velocity_window=30)
+
+    assert "effort: xhigh" in _footer_text(layout)
+    assert "cccccccc" in _footer_text(layout)
+    assert layout["footer"].size == 4
+
+
+def test_build_layout_footer_omits_effort_line_without_effort(tmp_path):
+    m = _load_monitor_module()
+    mon = m.Monitor(root=tmp_path / "projects", snapshot_dir=tmp_path / "snaps")
+    state = _state_with(m, "eeeeeeee5555", time.time(), None)
+    mon.sessions[state.session_id] = state
+
+    layout = m.build_layout(mon, velocity_window=30)
+
+    assert "effort:" not in _footer_text(layout)
+    assert layout["footer"].size == 3
+
+
+def test_build_layout_footer_keeps_existing_legend(tmp_path):
+    """The effort line is appended, not a replacement for the legend."""
+    m = _load_monitor_module()
+    mon = m.Monitor(root=tmp_path / "projects", snapshot_dir=tmp_path / "snaps")
+    state = _state_with(m, "ffffffff6666", time.time(), "high")
+    mon.sessions[state.session_id] = state
+
+    text = _footer_text(m.build_layout(mon, velocity_window=30))
+
+    assert "hook installed" in text
+    assert "$/h = cost rate" in text
+    assert "effort: high" in text
+
+
+# ---------------------------------------------------------------------------
+# footer at fixed terminal widths — regression for the clipping bug
+#
+# `layout.split_column(..., size=len(footer_lines))` counts *logical* lines,
+# but rich wraps long ones. The legend lines are long enough (134 / 133 chars)
+# to wrap at narrower widths, which consumes the footer pane's fixed row
+# budget and clips whatever line is *last*. Inspecting the `Text` object (as
+# the other footer tests above do) can't catch this — it only shows up once
+# the layout is actually rendered through a Console at a real width.
+# ---------------------------------------------------------------------------
+
+def _render_layout(layout, width: int) -> str:
+    """Plain text of a Layout rendered through a fixed-width Console."""
+    console = Console(file=io.StringIO(), width=width, height=50, no_color=True)
+    console.print(layout)
+    return console.file.getvalue()
+
+
+def test_footer_effort_line_survives_narrow_width(tmp_path):
+    """At width=120 the legend wraps; the effort line must still render.
+
+    This is the width the final review measured as broken (line clipped)
+    before the fix that puts the effort line first in `footer_lines`.
+    """
+    m = _load_monitor_module()
+    mon = m.Monitor(root=tmp_path / "projects", snapshot_dir=tmp_path / "snaps")
+    state = _state_with(m, "cccccccc3333", time.time(), "xhigh")
+    mon.sessions[state.session_id] = state
+
+    rendered = _render_layout(m.build_layout(mon, velocity_window=30), width=120)
+
+    assert "effort: xhigh" in rendered
+
+
+def test_footer_effort_line_survives_wide_width(tmp_path):
+    """At a wide width (200) nothing wraps, so this must pass regardless of
+    ordering — it pins the non-clipped case alongside the narrow one above."""
+    m = _load_monitor_module()
+    mon = m.Monitor(root=tmp_path / "projects", snapshot_dir=tmp_path / "snaps")
+    state = _state_with(m, "cccccccc3333", time.time(), "xhigh")
+    mon.sessions[state.session_id] = state
+
+    rendered = _render_layout(m.build_layout(mon, velocity_window=30), width=200)
+
+    assert "effort: xhigh" in rendered

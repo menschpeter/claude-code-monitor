@@ -27,6 +27,7 @@ Rows in the TUI are marked `●` (hook snapshot present — accurate `Cost` plus
 
 - **Two views side by side**: "Active" (sessions with activity in the last 15 minutes) and "Today" (everything with activity since local midnight).
 - **Per-session breakdown**: session id, project, last-activity age, input / output / cache-read / total tokens, live context-window occupancy (`Ctx`), cost, and three velocities.
+- **Effort line**: a footer line naming the reasoning effort level of the most recently active session (see "Effort line" below).
 - **Velocity columns**: total throughput (`t/s`, includes cache), generation rate (`out/s`, output tokens only), and cost rate (`$/h`), all over a configurable rolling window.
 - **Upgraded status bar**: folder · model · context % (green/yellow/red) · cost · Anthropic 5h and 7d rate-limit reset countdowns, directly in Claude Code.
 - **Graceful degradation**: if `jq` is missing the hook still writes the raw payload and prints a minimal hint instead of silently breaking.
@@ -208,6 +209,20 @@ python cc-session-monitor.py --refresh 0.5 --velocity-window 10
 | **$/h** | Cost rate extrapolated to one hour, over the velocity window | Computed from hook snapshots |
 
 A **TOTAL** footer row sums all sessions currently visible in that panel.
+
+### Effort line
+
+At the top of the footer at the bottom of the screen — ahead of the legend lines — the monitor shows the reasoning effort level of the most recently active session:
+
+```
+effort: xhigh  (2e2615e8, most recent)
+```
+
+It goes first (rather than below the legend) so it survives rich's line-wrapping at narrower terminal widths instead of being the row that gets clipped.
+
+It is scoped to one session — the one with the newest activity, named by its session-ID prefix — because effort is a per-session setting and a single unlabelled value spanning several sessions would be ambiguous. The line is omitted entirely when that session has not produced an assistant turn carrying an effort level yet — either because its model does not support one or because it has not produced an assistant turn yet.
+
+The value is read from the JSONL transcript, so it reflects the effort **used for the last request** rather than the level currently configured. Change the level with no follow-up request and the line keeps showing the previous value until the next assistant turn. This also means it works for `○`-marked (JSONL-only) sessions, not just hook-backed ones.
 
 ### Session marker
 

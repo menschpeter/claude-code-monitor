@@ -6,3 +6,7 @@ __pycache__/
 .coverage
 .coverage.*
 htmlcov/
+
+# Scratch workspace for subagent-driven plan execution (ledgers, briefs,
+# review packages). Ephemeral — git history is the durable record.
+.superpowers/

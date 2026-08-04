@@ -75,6 +75,7 @@ from cc_history import (
     UsageSample,
     parse_ts as _parse_ts,
     extract_usage as _extract_usage,
+    extract_effort as _extract_effort,
     merge_sample as _merge_sample,
     humanize_project as _humanize_project,
 )
@@ -147,6 +148,12 @@ class SessionState:
     hook_cwd: str | None = None
     hook_rl5_pct: float | None = None       # 5h rate-limit %
     hook_rl5_reset: int | None = None       # epoch seconds
+
+    # ----- JSONL-derived session settings -----
+    # Reasoning effort of the newest `assistant` entry. Deliberately NOT a
+    # field on UsageSample: _merge_sample does a per-field MAX merge, and MAX
+    # has no meaningful semantics for a string.
+    effort: str | None = None
 
     # rolling history of (ts, cost_usd) for $/h velocity
     cost_points: deque = field(default_factory=lambda: deque(maxlen=500))
@@ -267,6 +274,7 @@ class Monitor:
                 state.output_velocity_points.clear()
                 state.first_ts = None
                 state.last_ts = None
+                state.effort = None
 
             state.file_size = size
 
@@ -283,6 +291,19 @@ class Monitor:
                     entry = json.loads(raw)
                 except json.JSONDecodeError:
                     continue
+
+                # Before the usage guard below: an assistant entry without a
+                # usage block still tells us the session's effort level.
+                #
+                # The `if effort:` guard is load-bearing, not redundant: it
+                # keeps non-assistant entries (which yield None) from
+                # blanking a previously-seen value, and — per live-transcript
+                # analysis — assigning unconditionally would make the footer
+                # line flicker off on every `<synthetic>` interrupt entry.
+                # Do not simplify this to an unconditional assignment.
+                effort = _extract_effort(entry)
+                if effort:
+                    state.effort = effort
 
                 req_id, sample = _extract_usage(entry)
                 if sample is None:
@@ -508,6 +529,32 @@ def _fmt_ctx(used: int | None, size: int | None, pct: float | None) -> Text:
     return Text(_fmt_tokens(used), style=color)
 
 
+def _fmt_effort_footer(sessions: list[SessionState]) -> str | None:
+    """Footer line naming the reasoning effort of the most recent session.
+
+    Scoped to a single session on purpose: effort is a per-session setting, so
+    one unlabelled value spanning differing sessions would be ambiguous — hence
+    the session-ID annotation.
+
+    Returns None when the newest session has no effort level (its model does not
+    support one, or it has not produced an assistant turn yet). Falling through
+    to an older session would print a value that does not belong to the session
+    the line names.
+
+    Effort is informational, so the caller renders it in the footer's neutral
+    dim italic — no threshold colouring, which is reserved for `$/h`.
+    """
+    newest: SessionState | None = None
+    for state in sessions:
+        if state.last_ts is None:
+            continue
+        if newest is None or state.last_ts > newest.last_ts:
+            newest = state
+    if newest is None or not newest.effort:
+        return None
+    return f"effort: {newest.effort}  ({newest.session_id[:8]}, most recent)"
+
+
 def build_table(
     title: str,
     sessions: list[SessionState],
@@ -663,24 +710,34 @@ def build_layout(
         ("Ctrl-C to quit", "dim"),
     )
 
-    footer = Text(
+    # Effort goes first: `size=len(footer_lines)` below counts logical lines,
+    # but rich wraps the long legend lines at narrower terminal widths, which
+    # eats into the footer pane's fixed row budget and clips whichever line
+    # is last. Putting the highest-value line first means it survives that
+    # clipping instead of the legend.
+    footer_lines = []
+    effort_line = _fmt_effort_footer(active)
+    if effort_line:
+        footer_lines.append(effort_line)
+    footer_lines.extend([
         "● hook installed (accurate Cost + live Ctx gauge)   "
         "○ JSONL-only (no Cost/Ctx yet)   "
-        "install hook: --install-hook\n"
+        "install hook: --install-hook",
         "Input/Output/Total = JSONL cumulative (streaming placeholders, slight undercount)   "
-        "Ctx = live context window used/size\n"
+        "Ctx = live context window used/size",
         "t/s = total throughput incl. cache   "
         "out/s = generation rate (output tokens only)   "
         "$/h = cost rate (red = burning money)",
-        style="dim italic",
-    )
+    ])
+
+    footer = Text("\n".join(footer_lines), style="dim italic")
 
     layout = Layout()
     layout.split_column(
         Layout(Align.center(header), name="header", size=1),
         Layout(name="active"),
         Layout(name="daily"),
-        Layout(Align.center(footer), name="footer", size=3),
+        Layout(Align.center(footer), name="footer", size=len(footer_lines)),
     )
     layout["active"].update(Panel(active_tbl, border_style="green"))
     layout["daily"].update(Panel(daily_tbl, border_style="blue"))
