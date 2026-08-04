@@ -702,24 +702,28 @@ def build_layout(
         ("Ctrl-C to quit", "dim"),
     )
 
-    footer = Text(
+    footer_lines = [
         "● hook installed (accurate Cost + live Ctx gauge)   "
         "○ JSONL-only (no Cost/Ctx yet)   "
-        "install hook: --install-hook\n"
+        "install hook: --install-hook",
         "Input/Output/Total = JSONL cumulative (streaming placeholders, slight undercount)   "
-        "Ctx = live context window used/size\n"
+        "Ctx = live context window used/size",
         "t/s = total throughput incl. cache   "
         "out/s = generation rate (output tokens only)   "
         "$/h = cost rate (red = burning money)",
-        style="dim italic",
-    )
+    ]
+    effort_line = _fmt_effort_footer(active)
+    if effort_line:
+        footer_lines.append(effort_line)
+
+    footer = Text("\n".join(footer_lines), style="dim italic")
 
     layout = Layout()
     layout.split_column(
         Layout(Align.center(header), name="header", size=1),
         Layout(name="active"),
         Layout(name="daily"),
-        Layout(Align.center(footer), name="footer", size=3),
+        Layout(Align.center(footer), name="footer", size=len(footer_lines)),
     )
     layout["active"].update(Panel(active_tbl, border_style="green"))
     layout["daily"].update(Panel(daily_tbl, border_style="blue"))

@@ -209,6 +209,18 @@ python cc-session-monitor.py --refresh 0.5 --velocity-window 10
 
 A **TOTAL** footer row sums all sessions currently visible in that panel.
 
+### Effort line
+
+Below the legend at the bottom of the screen, the monitor shows the reasoning effort level of the most recently active session:
+
+```
+effort: xhigh  (2e2615e8, most recent)
+```
+
+It is scoped to one session — the one with the newest activity, named by its session-ID prefix — because effort is a per-session setting and a single unlabelled value spanning several sessions would be ambiguous. The line is omitted entirely when that session has no effort level, either because its model does not support one or because it has not produced an assistant turn yet.
+
+The value is read from the JSONL transcript, so it reflects the effort **used for the last request** rather than the level currently configured. Change the level with no follow-up request and the line keeps showing the previous value until the next assistant turn. This also means it works for `○`-marked (JSONL-only) sessions, not just hook-backed ones.
+
 ### Session marker
 
 - **`●` green** — a hook snapshot exists for this session; `Cost` and the `Ctx` gauge are **accurate**.

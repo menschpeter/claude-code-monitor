@@ -272,3 +272,51 @@ def test_fmt_effort_footer_uses_eight_char_session_prefix():
 
     assert "01234567" in line
     assert "89abcdef" not in line
+
+
+# ---------------------------------------------------------------------------
+# build_layout: footer carries the effort line
+# ---------------------------------------------------------------------------
+
+def _footer_text(layout) -> str:
+    """Plain text of the footer pane (Layout -> Align -> Text)."""
+    return layout["footer"].renderable.renderable.plain
+
+
+def test_build_layout_footer_includes_effort_line(tmp_path):
+    m = _load_monitor_module()
+    mon = m.Monitor(root=tmp_path / "projects", snapshot_dir=tmp_path / "snaps")
+    state = _state_with(m, "cccccccc3333", time.time(), "xhigh")
+    mon.sessions[state.session_id] = state
+
+    layout = m.build_layout(mon, velocity_window=30)
+
+    assert "effort: xhigh" in _footer_text(layout)
+    assert "cccccccc" in _footer_text(layout)
+    assert layout["footer"].size == 4
+
+
+def test_build_layout_footer_omits_effort_line_without_effort(tmp_path):
+    m = _load_monitor_module()
+    mon = m.Monitor(root=tmp_path / "projects", snapshot_dir=tmp_path / "snaps")
+    state = _state_with(m, "eeeeeeee5555", time.time(), None)
+    mon.sessions[state.session_id] = state
+
+    layout = m.build_layout(mon, velocity_window=30)
+
+    assert "effort:" not in _footer_text(layout)
+    assert layout["footer"].size == 3
+
+
+def test_build_layout_footer_keeps_existing_legend(tmp_path):
+    """The effort line is appended, not a replacement for the legend."""
+    m = _load_monitor_module()
+    mon = m.Monitor(root=tmp_path / "projects", snapshot_dir=tmp_path / "snaps")
+    state = _state_with(m, "ffffffff6666", time.time(), "high")
+    mon.sessions[state.session_id] = state
+
+    text = _footer_text(m.build_layout(mon, velocity_window=30))
+
+    assert "hook installed" in text
+    assert "$/h = cost rate" in text
+    assert "effort: high" in text
