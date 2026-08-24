@@ -52,7 +52,11 @@
 # for the same reason.
 $ErrorActionPreference = 'SilentlyContinue'
 
-$SnapshotDir = Join-Path $HOME ".claude\session-monitor\snapshots"
+$SnapshotDir = if (![string]::IsNullOrWhiteSpace($env:CC_MONITOR_SNAPSHOT_DIR)) {
+    $env:CC_MONITOR_SNAPSHOT_DIR
+} else {
+    Join-Path $HOME ".claude\session-monitor\snapshots"
+}
 $null = New-Item -ItemType Directory -Force -Path $SnapshotDir
 
 # Slurp stdin once.
@@ -93,6 +97,20 @@ function Get-SafeValue {
     return $cur
 }
 
+function Convert-ToNullableDouble {
+    param($Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [byte] -or $Value -is [sbyte] -or
+        $Value -is [int16] -or $Value -is [uint16] -or
+        $Value -is [int32] -or $Value -is [uint32] -or
+        $Value -is [int64] -or $Value -is [uint64] -or
+        $Value -is [single] -or $Value -is [double] -or
+        $Value -is [decimal]) {
+        return [double]$Value
+    }
+    return $null
+}
+
 # ---------- Extract fields with safe defaults ----------
 $session_id  = Get-SafeValue $payload @("session_id") -Default ""
 $cwd         = if ((Get-SafeValue $payload @("workspace","current_dir")) -ne $null) {
@@ -106,7 +124,7 @@ $model       = if ((Get-SafeValue $payload @("model","display_name")) -ne $null)
                    Get-SafeValue $payload @("model","id") -Default "?"
                }
 
-$cost_usd    = Get-SafeValue $payload @("cost","total_cost_usd")    -Default 0
+$cost_usd    = Convert-ToNullableDouble (Get-SafeValue $payload @("cost","total_cost_usd") -Default $null)
 $duration_ms = Get-SafeValue $payload @("cost","total_duration_ms") -Default 0
 
 # NOTE: as of Claude Code v2.1.132 total_input_tokens / total_output_tokens are
@@ -136,6 +154,48 @@ if (![string]::IsNullOrWhiteSpace($session_id)) {
     $snapshot_path = Join-Path $SnapshotDir "$session_id.json"
     $tmp_path      = Join-Path $SnapshotDir ".$session_id.tmp.$([guid]::NewGuid().ToString('N'))"
 
+    $previousCost = $null
+    if (Test-Path -LiteralPath $snapshot_path) {
+        try {
+            $previousSnapshot = Get-Content -Raw -LiteralPath $snapshot_path | ConvertFrom-Json
+            $previousCost = Get-SafeValue $previousSnapshot @("cost") -Default $null
+        } catch {
+            $previousCost = $null
+        }
+    }
+
+    $previousRaw = Convert-ToNullableDouble (Get-SafeValue $previousCost @("last_valid_raw_cost_usd") -Default $null)
+    if ($null -eq $previousRaw) {
+        $previousRaw = Convert-ToNullableDouble (Get-SafeValue $previousCost @("total_cost_usd") -Default $null)
+    }
+    $previousObserved = Convert-ToNullableDouble (Get-SafeValue $previousCost @("last_valid_observed_total_cost_usd") -Default $null)
+    if ($null -eq $previousObserved) {
+        $previousObserved = Convert-ToNullableDouble (Get-SafeValue $previousCost @("observed_total_cost_usd") -Default $null)
+    }
+    if ($null -eq $previousObserved) { $previousObserved = $previousRaw }
+
+    $counterResetsValue = Convert-ToNullableDouble (Get-SafeValue $previousCost @("counter_resets") -Default 0)
+    $counterResets = if ($null -eq $counterResetsValue) { 0 } else { [int]$counterResetsValue }
+
+    if ($null -eq $cost_usd) {
+        $observedCost = $null
+        $lastValidRaw = $previousRaw
+        $lastValidObserved = $previousObserved
+    } elseif ($null -eq $previousRaw -or $null -eq $previousObserved) {
+        $observedCost = $cost_usd
+        $lastValidRaw = $cost_usd
+        $lastValidObserved = $cost_usd
+    } elseif ($cost_usd -lt $previousRaw) {
+        $observedCost = $previousObserved + $cost_usd
+        $lastValidRaw = $cost_usd
+        $lastValidObserved = $observedCost
+        $counterResets += 1
+    } else {
+        $observedCost = $previousObserved + ($cost_usd - $previousRaw)
+        $lastValidRaw = $cost_usd
+        $lastValidObserved = $observedCost
+    }
+
     $snapshot = [ordered]@{
         snapshot_ts    = $now_ts
         session_id     = [string]$session_id
@@ -143,7 +203,11 @@ if (![string]::IsNullOrWhiteSpace($session_id)) {
         transcript_path = [string](Get-SafeValue $payload @("transcript_path") -Default "")
         model          = [string]$model
         cost           = [ordered]@{
-            total_cost_usd         = [double]$cost_usd
+            total_cost_usd         = $cost_usd
+            observed_total_cost_usd = $observedCost
+            last_valid_raw_cost_usd = $lastValidRaw
+            last_valid_observed_total_cost_usd = $lastValidObserved
+            counter_resets         = $counterResets
             total_duration_ms      = [double]$duration_ms
             total_api_duration_ms  = [double](Get-SafeValue $payload @("cost","total_api_duration_ms") -Default 0)
             total_lines_added      = [int](Get-SafeValue $payload @("cost","total_lines_added") -Default 0)
@@ -189,8 +253,10 @@ if ([string]::IsNullOrWhiteSpace($folder)) { $folder = "?" }
 $ctx_int = [int][Math]::Floor([double]$ctx_pct)
 $ctx_color = if ($ctx_int -lt 50) { $GREEN } elseif ($ctx_int -lt 80) { $YELLOW } else { $RED }
 
-# Format cost.
-$cost_fmt = if ([double]$cost_usd -lt 0.01) {
+# Format cost. Missing/non-numeric input is unknown, never a synthetic zero.
+$cost_fmt = if ($null -eq $cost_usd) {
+    '—'
+} elseif ([double]$cost_usd -lt 0.01) {
     '$' + ([double]$cost_usd).ToString("0.0000")
 } elseif ([double]$cost_usd -lt 1) {
     '$' + ([double]$cost_usd).ToString("0.000")
@@ -223,7 +289,7 @@ if ($rl7_reset -ne 0 -and $rl7_reset -ne "null" -and $null -ne $rl7_reset) {
 }
 
 # Emit the single-line statusline.  Claude Code uses only the first line.
-$line = "${CYAN}${folder}${RESET} ${DIM}|${RESET} ${DIM}${model}${RESET} ${DIM}|${RESET} ctx ${ctx_color}${ctx_int}%${RESET} ${DIM}|${RESET} ${GREEN}${cost_fmt}${RESET}${rl5_str}${rl7_str}"
+$line = "${CYAN}${folder}${RESET} ${DIM}|${RESET} ${DIM}${model}${RESET} ${DIM}|${RESET} ctx ${ctx_color}${ctx_int}%${RESET} ${DIM}|${RESET} ${GREEN}est ${cost_fmt}${RESET}${rl5_str}${rl7_str}"
 Write-Host $line
 
 exit 0

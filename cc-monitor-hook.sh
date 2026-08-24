@@ -44,7 +44,7 @@
 
 set -u  # intentionally NOT -e: a broken snapshot must not kill the statusline
 
-SNAPSHOT_DIR="${HOME}/.claude/session-monitor/snapshots"
+SNAPSHOT_DIR="${CC_MONITOR_SNAPSHOT_DIR:-${HOME}/.claude/session-monitor/snapshots}"
 mkdir -p "$SNAPSHOT_DIR" 2>/dev/null || true
 
 # Slurp stdin once — we need it for both the snapshot and the statusline.
@@ -65,14 +65,19 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 # ---------- Extract fields with null-safe defaults ----------
-# The payload shape varies a bit across Claude Code versions; we use // 0
-# or // "" so missing keys never break the jq pipeline.
+# The payload shape varies a bit across Claude Code versions; missing keys
+# must never break the jq pipeline. Cost is deliberately not defaulted to 0:
+# unavailable estimates stay unknown all the way to the UI.
 session_id=$(printf '%s' "$INPUT" | jq -r '.session_id // ""')
 cwd=$(printf '%s' "$INPUT" | jq -r '.workspace.current_dir // .cwd // ""')
 transcript=$(printf '%s' "$INPUT" | jq -r '.transcript_path // ""')
 model=$(printf '%s' "$INPUT" | jq -r '.model.display_name // .model.id // "?"')
 
-cost_usd=$(printf '%s' "$INPUT" | jq -r '.cost.total_cost_usd // 0')
+cost_usd=$(printf '%s' "$INPUT" | jq -r '
+  if (.cost.total_cost_usd | type) == "number"
+  then (.cost.total_cost_usd | tostring)
+  else "null"
+  end')
 duration_ms=$(printf '%s' "$INPUT" | jq -r '.cost.total_duration_ms // 0')
 
 # NOTE: as of Claude Code v2.1.132 context_window.total_input_tokens /
@@ -96,15 +101,68 @@ if [ -n "$session_id" ]; then
   snapshot_path="${SNAPSHOT_DIR}/${session_id}.json"
   tmp_path="${SNAPSHOT_DIR}/.${session_id}.tmp.$$"
 
+  # The previous atomic snapshot is the normalization state. Legacy snapshots
+  # only carried total_cost_usd, so that value seeds both prior counters.
+  previous_cost='{}'
+  if [ -f "$snapshot_path" ]; then
+    previous_cost=$(jq -c '.cost // {}' "$snapshot_path" 2>/dev/null) || previous_cost='{}'
+  fi
+
   # Build snapshot with jq to guarantee valid JSON (no bash string-escaping bugs).
-  if printf '%s' "$INPUT" | jq --arg ts "$now_ts" '{
+  if printf '%s' "$INPUT" | jq --arg ts "$now_ts" --argjson prev "$previous_cost" '
+      def numeric_or_null: if type == "number" then . else null end;
+      (.cost.total_cost_usd | numeric_or_null) as $raw
+      | ($prev.last_valid_raw_cost_usd | numeric_or_null)
+          // ($prev.total_cost_usd | numeric_or_null) as $prev_raw
+      | ($prev.last_valid_observed_total_cost_usd | numeric_or_null)
+          // ($prev.observed_total_cost_usd | numeric_or_null)
+          // ($prev.total_cost_usd | numeric_or_null) as $prev_observed
+      | (($prev.counter_resets | numeric_or_null) // 0 | floor) as $prev_resets
+      | (if $raw == null then
+          {
+            raw: null,
+            observed: null,
+            last_valid: $prev_raw,
+            last_valid_observed: $prev_observed,
+            resets: $prev_resets
+          }
+        elif $prev_raw == null or $prev_observed == null then
+          {
+            raw: $raw,
+            observed: $raw,
+            last_valid: $raw,
+            last_valid_observed: $raw,
+            resets: $prev_resets
+          }
+        elif $raw < $prev_raw then
+          {
+            raw: $raw,
+            observed: ($prev_observed + $raw),
+            last_valid: $raw,
+            last_valid_observed: ($prev_observed + $raw),
+            resets: ($prev_resets + 1)
+          }
+        else
+          {
+            raw: $raw,
+            observed: ($prev_observed + $raw - $prev_raw),
+            last_valid: $raw,
+            last_valid_observed: ($prev_observed + $raw - $prev_raw),
+            resets: $prev_resets
+          }
+        end) as $cost_state
+      | {
         snapshot_ts: ($ts | tonumber),
         session_id: (.session_id // ""),
         cwd: (.workspace.current_dir // .cwd // ""),
         transcript_path: (.transcript_path // ""),
         model: (.model.display_name // .model.id // ""),
         cost: {
-          total_cost_usd: (.cost.total_cost_usd // 0),
+          total_cost_usd: $cost_state.raw,
+          observed_total_cost_usd: $cost_state.observed,
+          last_valid_raw_cost_usd: $cost_state.last_valid,
+          last_valid_observed_total_cost_usd: $cost_state.last_valid_observed,
+          counter_resets: $cost_state.resets,
           total_duration_ms: (.cost.total_duration_ms // 0),
           total_api_duration_ms: (.cost.total_api_duration_ms // 0),
           total_lines_added: (.cost.total_lines_added // 0),
@@ -152,11 +210,15 @@ else
 fi
 
 # Format cost as $X.XX or $X.XXX for small values.
-cost_fmt=$(awk -v c="$cost_usd" 'BEGIN{
-  if (c < 0.01) printf "$%.4f", c;
-  else if (c < 1) printf "$%.3f", c;
-  else printf "$%.2f", c
-}')
+if [ "$cost_usd" = "null" ]; then
+  cost_fmt="—"
+else
+  cost_fmt=$(awk -v c="$cost_usd" 'BEGIN{
+    if (c < 0.01) printf "$%.4f", c;
+    else if (c < 1) printf "$%.3f", c;
+    else printf "$%.2f", c
+  }')
+fi
 
 # 5h reset countdown, if available.
 rl5_str=""
@@ -191,7 +253,7 @@ printf '%s%s%s %s│%s %s%s%s %s│%s ctx %s%s%%%s %s│%s %s%s%s%b\n' \
   "$C_DIM" "$C_RESET" \
   "$ctx_color" "$ctx_int" "$C_RESET" \
   "$C_DIM" "$C_RESET" \
-  "$C_GREEN" "$cost_fmt" "$C_RESET" \
+  "$C_GREEN" "est $cost_fmt" "$C_RESET" \
   "${rl5_str}${rl7_str}"
 
 exit 0
