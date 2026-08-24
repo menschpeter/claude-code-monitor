@@ -304,6 +304,86 @@ def test_entries_for_date_persists_attributable_cost_state(tmp_path):
     assert entry.last_cost_ts == ts + 60
 
 
+def _cost_state(
+    m, now, session_estimate, today_estimate=None, sid="cost-state"
+):
+    state = m.SessionState(sid, "proj", Path(f"/tmp/{sid}.jsonl"))
+    state.first_ts = now
+    state.last_ts = now
+    state.hook_ts = now
+    state.hook_observed_cost_usd = session_estimate
+    state.estimated_cost_by_date["2026-08-24"] = today_estimate
+    return state
+
+
+def test_active_and_today_tables_use_different_cost_scopes():
+    m = _load_monitor_module()
+    now = _local_ts(2026, 8, 24, 12, 0)
+    state = _cost_state(m, now, session_estimate=13.0, today_estimate=3.0)
+
+    active = m.build_table("Active", [state], now, 30)
+    today = m.build_table(
+        "Today",
+        [state],
+        now,
+        30,
+        scope_cutoff=m.local_midnight_ts(now),
+        cost_scope_date="2026-08-24",
+    )
+
+    assert _cells(active, 10)[0] == "$13.00"
+    assert _cells(today, 10)[0] == "$3.00"
+    assert active.columns[10].header == "Est. session $"
+    assert today.columns[10].header == "Est. today $"
+
+
+def test_unknown_cost_makes_total_unknown():
+    m = _load_monitor_module()
+    now = _local_ts(2026, 8, 24, 12, 0)
+    known = _cost_state(m, now, session_estimate=2.0, sid="known")
+    unknown = _cost_state(m, now, session_estimate=None, sid="unknown")
+
+    table = m.build_table("Active", [known, unknown], now, 30)
+
+    assert _cells(table, 10)[-1] == "—"
+
+
+def test_known_zero_cost_total_renders_zero():
+    m = _load_monitor_module()
+    now = _local_ts(2026, 8, 24, 12, 0)
+    state = _cost_state(m, now, session_estimate=0.0)
+
+    table = m.build_table("Active", [state], now, 30)
+
+    assert _cells(table, 10)[-1] == "$0.00"
+
+
+def test_missing_snapshot_cost_renders_dash_not_zero():
+    m = _load_monitor_module()
+    now = _local_ts(2026, 8, 24, 12, 0)
+    monitor = m.Monitor.__new__(m.Monitor)
+    monitor.sessions = {}
+    monitor._snapshot_mtimes = {}
+    monitor._restored_date = None
+    monitor._restored_cost_entries = {}
+    monitor._apply_snapshot(
+        {
+            "session_id": "missing",
+            "snapshot_ts": now,
+            "cost": {
+                "total_cost_usd": None,
+                "observed_total_cost_usd": None,
+            },
+        }
+    )
+
+    table = m.build_table(
+        "Active", list(monitor.sessions.values()), now, 30
+    )
+
+    assert _cells(table, 10)[0] == "—"
+
+
 def test_refresh_captures_effort_from_newest_assistant_line(tmp_path):
     m = _load_monitor_module()
     proj = tmp_path / "projects" / "-Users-x-myproj"
@@ -460,8 +540,8 @@ def test_build_layout_footer_keeps_existing_legend(tmp_path):
 
     text = _footer_text(m.build_layout(mon, velocity_window=30))
 
-    assert "hook installed" in text
-    assert "$/h = cost rate" in text
+    assert "snapshot available" in text
+    assert "$/h = estimated list-price cost rate" in text
     assert "effort: high" in text
 
 

@@ -668,6 +668,7 @@ def build_table(
     now: float,
     velocity_window: int,
     scope_cutoff: float | None = None,
+    cost_scope_date: str | None = None,
 ) -> Table:
     """
     scope_cutoff: if given, only tokens accumulated at/after this ts are
@@ -691,7 +692,8 @@ def build_table(
     table.add_column("Ctx", justify="right")
     table.add_column("t/s", justify="right")
     table.add_column("out/s", justify="right")
-    table.add_column("Cost", justify="right", style="green")
+    cost_header = "Est. today $" if cost_scope_date else "Est. session $"
+    table.add_column(cost_header, justify="right", style="green")
     table.add_column("$/h", justify="right")
 
     if not sessions:
@@ -706,6 +708,7 @@ def build_table(
 
     grand_total_tokens = 0
     grand_total_cost = 0.0
+    all_costs_known = True
     for s in sessions:
         totals = s.totals_since(scope_cutoff) if scope_cutoff else s.totals()
         age = now - (s.effective_last_ts() or now)
@@ -727,13 +730,22 @@ def build_table(
 
         ctx_txt = _fmt_ctx(s.hook_ctx_input, s.hook_ctx_size, s.hook_ctx_pct)
 
-        cost_txt = (
-            Text(f"${s.hook_cost_usd:.2f}" if s.hook_cost_usd >= 1
-                 else f"${s.hook_cost_usd:.3f}", style="green")
-            if s.hook_cost_usd is not None else Text("—", style="dim")
+        row_cost = (
+            s.estimated_cost_by_date.get(cost_scope_date)
+            if cost_scope_date is not None
+            else s.hook_observed_cost_usd
         )
-        if s.hook_cost_usd is not None:
-            grand_total_cost += s.hook_cost_usd
+        cost_txt = (
+            Text(
+                f"${row_cost:.2f}" if row_cost >= 1 else f"${row_cost:.3f}",
+                style="green",
+            )
+            if row_cost is not None else Text("—", style="dim")
+        )
+        if row_cost is None:
+            all_costs_known = False
+        else:
+            grand_total_cost += row_cost
 
         cvel = s.cost_velocity(velocity_window, now)
         cvel_txt = (
@@ -743,8 +755,8 @@ def build_table(
             if cvel > 0 else Text("—", style="dim")
         )
 
-        # Mark rows with a live hook snapshot (●): their Cost, $/h and Ctx
-        # gauge are hook-backed. ○ rows are JSONL-only — no Cost/Ctx yet.
+        # Mark rows with a live hook snapshot (●). An individual estimate can
+        # still be unknown; the marker only promises snapshot-backed live data.
         # Input/Output/Cache/Total are JSONL-derived for both.
         marker = "●" if s.hook_ts is not None else "○"
         marker_color = "green" if s.hook_ts is not None else "yellow"
@@ -767,10 +779,10 @@ def build_table(
 
     # Summary footer
     table.add_section()
-    cost_cell = (Text(f"${grand_total_cost:.2f}",
-                      style="bold white on green")
-                 if grand_total_cost > 0
-                 else Text("—", style="dim"))
+    cost_cell = (
+        Text(f"${grand_total_cost:.2f}", style="bold white on green")
+        if all_costs_known else Text("—", style="dim")
+    )
     table.add_row(
         Text("TOTAL", style="bold"),
         Text(f"{len(sessions)} session(s)", style="dim"),
@@ -805,6 +817,7 @@ def build_layout(
         now,
         velocity_window,
         scope_cutoff=daily_cutoff,
+        cost_scope_date=datetime.fromtimestamp(now).date().isoformat(),
     )
 
     header = Text.assemble(
@@ -827,14 +840,14 @@ def build_layout(
     if effort_line:
         footer_lines.append(effort_line)
     footer_lines.extend([
-        "● hook installed (accurate Cost + live Ctx gauge)   "
-        "○ JSONL-only (no Cost/Ctx yet)   "
+        "● snapshot available (estimate may be —; live Ctx gauge)   "
+        "○ JSONL-only (no estimate/Ctx yet)   "
         "install hook: --install-hook",
         "Input/Output/Total = JSONL cumulative (streaming placeholders, slight undercount)   "
         "Ctx = live context window used/size",
         "t/s = total throughput incl. cache   "
         "out/s = generation rate (output tokens only)   "
-        "$/h = cost rate (red = burning money)",
+        "$/h = estimated list-price cost rate (red = high)",
     ])
 
     footer = Text("\n".join(footer_lines), style="dim italic")
@@ -1003,24 +1016,30 @@ def main() -> int:
         )
         return 2
 
-    monitor = Monitor(
-        root=args.projects_dir,
-        snapshot_dir=args.snapshot_dir,
-        velocity_window=args.velocity_window,
-    )
-    console = Console()
-
     logger = HistoryLogger(
         history_dir=args.history_dir,
         enabled=not args.no_log,
     )
 
+    restored_record: DailyRecord | None = None
     if logger.enabled:
         startup_today = date.today()
         logger.run_retention(today=startup_today)
         logger.reconstruct_missing_days(
             today=startup_today, projects_dir=args.projects_dir,
         )
+        restored_record = logger.read_daily(startup_today.isoformat())
+
+    monitor = Monitor(
+        root=args.projects_dir,
+        snapshot_dir=args.snapshot_dir,
+        velocity_window=args.velocity_window,
+        restored_date=(restored_record.date if restored_record else None),
+        restored_cost_entries=(
+            restored_record.sessions if restored_record else None
+        ),
+    )
+    console = Console()
 
     last_log_write = 0.0
     last_log_date: date | None = None
