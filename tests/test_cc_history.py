@@ -8,6 +8,93 @@ from cc_history import DailyRecord, DailySessionEntry, HistoryLogger, extract_ef
 from datetime import date as date_cls
 
 
+def _daily_entry(**overrides):
+    values = {
+        "project": "proj",
+        "model": "Opus",
+        "first_ts": 1.0,
+        "last_ts": 2.0,
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "cache_read_tokens": 20,
+        "cache_creation_tokens": 2,
+        "session_cumulative_cost_usd": 1.0,
+    }
+    values.update(overrides)
+    return DailySessionEntry(**values)
+
+
+def test_daily_record_round_trip_preserves_estimated_cost_state():
+    entry = _daily_entry(
+        session_cumulative_cost_usd=1.5,
+        estimated_cost_usd=4.25,
+        last_observed_total_cost_usd=12.75,
+        last_raw_cost_usd=1.5,
+        cost_counter_resets=2,
+        last_cost_ts=1787583000.0,
+    )
+    restored = DailyRecord.from_dict(
+        DailyRecord("2026-08-24", False, 1787583000.0, {"s": entry}).to_dict()
+    )
+
+    assert restored.sessions["s"].estimated_cost_usd == 4.25
+    assert restored.sessions["s"].last_observed_total_cost_usd == 12.75
+    assert restored.sessions["s"].last_raw_cost_usd == 1.5
+    assert restored.sessions["s"].cost_counter_resets == 2
+    assert restored.sessions["s"].last_cost_ts == 1787583000.0
+
+
+def test_estimated_cost_total_is_null_if_any_session_unknown():
+    record = DailyRecord(
+        "2026-08-24",
+        False,
+        1.0,
+        {
+            "known": _daily_entry(estimated_cost_usd=1.0),
+            "unknown": _daily_entry(estimated_cost_usd=None),
+        },
+    )
+
+    assert record.to_dict()["totals"]["estimated_cost_usd"] is None
+
+
+def test_read_daily_returns_record_or_none(tmp_path):
+    logger = HistoryLogger(tmp_path)
+    assert logger.read_daily("2026-08-24") is None
+
+    logger.write_today("2026-08-24", {"s": _daily_entry()}, 1.0)
+
+    restored = logger.read_daily("2026-08-24")
+    assert restored is not None
+    assert restored.date == "2026-08-24"
+
+
+def test_legacy_daily_record_defaults_new_cost_fields_to_unknown():
+    restored = DailyRecord.from_dict(
+        {
+            "date": "2026-08-24",
+            "reconstructed": False,
+            "generated_at": 1.0,
+            "sessions": {
+                "s": {
+                    "project": "proj",
+                    "model": "Opus",
+                    "first_ts": 1.0,
+                    "last_ts": 2.0,
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cache_read_tokens": 20,
+                    "cache_creation_tokens": 2,
+                    "session_cumulative_cost_usd": 1.0,
+                }
+            },
+        }
+    )
+
+    assert restored.sessions["s"].estimated_cost_usd is None
+    assert restored.sessions["s"].last_observed_total_cost_usd is None
+
+
 def test_daily_record_round_trip():
     rec = DailyRecord(
         date="2026-04-23",
@@ -36,6 +123,7 @@ def test_daily_record_round_trip():
         "cache_read_tokens": 500,
         "cache_creation_tokens": 10,
         "session_cumulative_cost_usd": 1.23,
+        "estimated_cost_usd": None,
     }
     # round-trip through JSON
     restored = DailyRecord.from_dict(json.loads(json.dumps(as_dict)))
@@ -144,7 +232,11 @@ def _write_daily_fixture(
 def test_retention_rolls_old_daily_into_monthly(tmp_path):
     daily_dir = tmp_path / "daily"
     # today = 2026-04-23, so keep 04-21, 04-22, 04-23. Roll older.
-    _write_daily_fixture(daily_dir, "2026-04-18")
+    _write_daily_fixture(
+        daily_dir,
+        "2026-04-18",
+        {"priced": _daily_entry(estimated_cost_usd=2.5)},
+    )
     _write_daily_fixture(daily_dir, "2026-04-19")
     _write_daily_fixture(daily_dir, "2026-04-20")   # boundary: should roll
     _write_daily_fixture(daily_dir, "2026-04-21")
@@ -169,6 +261,7 @@ def test_retention_rolls_old_daily_into_monthly(tmp_path):
     assert [l["date"] for l in lines] == ["2026-04-18", "2026-04-19", "2026-04-20"]
     # monthly lines drop generated_at
     assert "generated_at" not in lines[0]
+    assert lines[0]["sessions"]["priced"]["estimated_cost_usd"] == 2.5
 
 
 def test_retention_across_month_boundary(tmp_path):
@@ -307,8 +400,10 @@ def test_reconstruct_missing_days_from_jsonl(tmp_path):
     assert s["cache_read_tokens"] == 600
     assert s["cache_creation_tokens"] == 10
     assert s["session_cumulative_cost_usd"] is None
+    assert s["estimated_cost_usd"] is None
     assert s["project"] == "myproj"
     assert rec22["totals"]["session_cumulative_cost_usd"] is None
+    assert rec22["totals"]["estimated_cost_usd"] is None
 
 
 def test_reconstruct_does_not_overwrite_live_file(tmp_path):

@@ -1,6 +1,6 @@
 # claude-code-monitor
 
-A live terminal UI for tracking [Claude Code](https://claude.com/claude-code) token usage, cost, and velocity across all your active sessions — plus a `statusLine` hook that upgrades Claude Code's own status bar with accurate cost and context-window info.
+A live terminal UI for tracking [Claude Code](https://claude.com/claude-code) token usage, estimated API list-price cost, and velocity across all your active sessions — plus a `statusLine` hook that upgrades Claude Code's own status bar with cost estimates and live context-window info.
 
 The scripts inside use a short `cc-` prefix (short for "Claude Code") for internal consistency — the repo name spells it out for discoverability.
 
@@ -12,24 +12,26 @@ Three components work together:
 
 ## Why this exists
 
-Claude Code writes streaming transcripts to `~/.claude/projects/<project>/<session>.jsonl`. The `input_tokens` and `output_tokens` fields in those logs are **streaming placeholders** — they undercount real billed usage and get duplicated across chunks. Cache token fields are accurate, but cost and context-window totals are not present in the JSONL at all.
+Claude Code writes streaming transcripts to `~/.claude/projects/<project>/<session>.jsonl`. The `input_tokens` and `output_tokens` fields in those logs are **streaming placeholders** — they undercount API usage and get duplicated across chunks. Cache token fields are reliable, but cost and context-window totals are not present in the JSONL at all.
 
-The `statusLine` hook API, on the other hand, receives an accurate cumulative `total_cost_usd` on every turn — the one number missing from the JSONL entirely. This project bridges the two:
+The [`statusLine` API](https://code.claude.com/docs/en/statusline) receives `cost.total_cost_usd`, a client-side estimate of the current session at standard Anthropic API list prices. It is useful for comparing sessions, but it is not an invoice or an authoritative billing record. In particular, Claude Pro/Max usage included with a subscription is not a per-session API charge. This project bridges that estimate with the JSONL data:
 
-1. The hook persists each turn's snapshot to `~/.claude/session-monitor/snapshots/<session_id>.json`.
-2. The TUI merges those snapshots with JSONL-derived tokens and renders the whole picture.
+1. The hook persists each turn's raw estimate and builds a monotonic observed-session estimate across counter resets.
+2. The TUI merges those snapshots with JSONL-derived tokens and attributes observed estimate deltas to local calendar days.
 
-Rows in the TUI are marked `●` (hook snapshot present — accurate `Cost` plus the live `Ctx` gauge) or `○` (JSONL-only, no cost yet) so you always know which numbers to trust.
+Rows in the TUI are marked `●` when a hook snapshot is present or `○` when only JSONL is available. A `●` means live snapshot data exists; the estimate can still be `—` when Claude did not provide a valid value or the day cannot be attributed safely.
+
+For billing and organization-wide reporting, use the [Claude Console Usage and Cost API](https://platform.claude.com/docs/en/manage-claude/usage-cost-api) or the billing console of the API provider that actually handled the request.
 
 > **Note (Claude Code v2.1.132+):** the hook's `context_window.total_input_tokens` / `total_output_tokens` now report *current context-window occupancy*, not cumulative session totals. The TUI surfaces those in a dedicated **Ctx** column and always derives cumulative Input/Output from the JSONL transcript.
 
 ## Features
 
 - **Two views side by side**: "Active" (sessions with activity in the last 15 minutes) and "Today" (everything with activity since local midnight).
-- **Per-session breakdown**: session id, project, last-activity age, input / output / cache-read / total tokens, live context-window occupancy (`Ctx`), cost, and three velocities.
+- **Per-session breakdown**: session id, project, last-activity age, input / output / cache-read / total tokens, live context-window occupancy (`Ctx`), estimated cost, and three velocities.
 - **Effort line**: a footer line naming the reasoning effort level of the most recently active session (see "Effort line" below).
-- **Velocity columns**: total throughput (`t/s`, includes cache), generation rate (`out/s`, output tokens only), and cost rate (`$/h`), all over a configurable rolling window.
-- **Upgraded status bar**: folder · model · context % (green/yellow/red) · cost · Anthropic 5h and 7d rate-limit reset countdowns, directly in Claude Code.
+- **Velocity columns**: total throughput (`t/s`, includes cache), generation rate (`out/s`, output tokens only), and estimated list-price rate (`$/h`), all over a configurable rolling window.
+- **Upgraded status bar**: folder · model · context % (green/yellow/red) · raw estimate · Anthropic 5h and 7d rate-limit reset countdowns, directly in Claude Code.
 - **Graceful degradation**: if `jq` is missing the hook still writes the raw payload and prints a minimal hint instead of silently breaking.
 - **Safe by default**: atomic snapshot writes via `mv(1)`, tail-only JSONL reads, and the hook deliberately does not `set -e` so a bad payload can never blank your status bar.
 
@@ -54,6 +56,8 @@ python3 cc-session-monitor.py --install-hook
 # 4. In a second terminal, launch the monitor
 python3 cc-session-monitor.py
 ```
+
+After updating this repository, run `python3 cc-session-monitor.py --install-hook` again and restart Claude Code. The installed hook is a copy, so it does not update automatically with the checkout.
 
 A convenience wrapper is included:
 
@@ -204,11 +208,12 @@ python cc-session-monitor.py --refresh 0.5 --velocity-window 10
 | **Total** | `Input + Output + Cache-Read + Cache-Create` | Computed from JSONL |
 | **Ctx** | Live context-window occupancy as `used/size` (current load, not cumulative) — drops after `/compact`. Colored like the status-bar gauge. | Hook |
 | **t/s** | Total token throughput over the velocity window — sums **all** token types (input + output + cache-read + cache-create). Cache-reads usually dominate, so this tracks data flow, not work done. | Computed from JSONL |
-| **out/s** | Generation rate: **output tokens per second only**. The "real work" signal — the cost-relevant tokens the model actually produced. See *Accuracy caveat* below. | Computed from JSONL |
-| **Cost** | Cumulative USD since session start | Hook |
-| **$/h** | Cost rate extrapolated to one hour, over the velocity window | Computed from hook snapshots |
+| **out/s** | Generation rate: **output tokens per second only**. The "real work" signal — tokens the model actually produced. See *Accuracy caveat* below. | Computed from JSONL |
+| **Est. session $** | Reset-safe observed session estimate in the Active panel | Hook snapshots |
+| **Est. today $** | Estimate deltas attributable to the local calendar day in the Today panel | Hook snapshots + daily baseline |
+| **$/h** | Estimated API list-price rate extrapolated to one hour, over the velocity window | Computed from normalized hook snapshots |
 
-A **TOTAL** footer row sums all sessions currently visible in that panel.
+A **TOTAL** footer row sums all sessions currently visible in that panel. If any visible session's estimate is unknown, the dollar total is `—` rather than a misleading partial sum.
 
 ### Effort line
 
@@ -226,12 +231,12 @@ The value is read from the JSONL transcript, so it reflects the effort **used fo
 
 ### Session marker
 
-- **`●` green** — a hook snapshot exists for this session; `Cost` and the `Ctx` gauge are **accurate**.
-- **`○` yellow** — JSONL-only fallback; no `Cost`/`Ctx` yet. `Input` / `Output` are JSONL-derived for **both** markers (streaming placeholders that slightly undercount real billed tokens). Install the hook to add cost + context tracking.
+- **`●` green** — a hook snapshot exists for this session. The live `Ctx` gauge is available; an estimated dollar value may still be `—`.
+- **`○` yellow** — JSONL-only fallback; no estimate or `Ctx` yet. `Input` / `Output` are JSONL-derived for **both** markers (streaming placeholders that slightly undercount API usage). Install the hook to add estimate + context tracking.
 
 ### Velocity columns — what's a warning, what's just info
 
-Only **`$/h`** is a warning metric (red = burning money). `t/s` and `out/s` are informational — high throughput or fast generation isn't bad, so they're rendered in a single neutral color.
+Only **`$/h`** uses warning colors. `t/s` and `out/s` are informational — high throughput or fast generation isn't bad, so they're rendered in a single neutral color. The thresholds classify the list-price estimate, not actual subscription spend.
 
 | Column | Color | Meaning |
 |---|---|---|
@@ -241,7 +246,7 @@ Only **`$/h`** is a warning metric (red = burning money). `t/s` and `out/s` are 
 
 #### Accuracy caveat for `out/s` (and `Output`)
 
-`out/s` is computed from `output_tokens` values in Claude Code's JSONL transcripts. Those values are streaming placeholders and tend to **undercount** real billed output (same caveat as the `Output` column on `○`-marked rows). The hook can't supply an accurate series because it only carries a cumulative snapshot — fine for a single number, not enough for a rate. Treat `out/s` as a **good-enough order of magnitude**, not a billing-accurate figure. The `$/h` column remains the authoritative cost-rate signal because it's derived from `total_cost_usd` snapshots written by the hook.
+`out/s` is computed from `output_tokens` values in Claude Code's JSONL transcripts. Those values are streaming placeholders and tend to **undercount** API output. The hook cannot supply an output-token series because it only carries cumulative state. Treat `out/s` as a **good-enough order of magnitude**, not a billing figure. `$/h` is the corresponding rate of the hook's client-side list-price estimate; it is more internally consistent for comparisons, but it is still not an authoritative charge.
 
 ### Reading the velocities together
 
@@ -257,7 +262,7 @@ The interesting signal is the relationship between the three:
 ### Status-bar colors (Claude Code itself, not the TUI)
 
 The hook prints a colored one-liner into Claude Code's status bar:
-`folder · model · ctx % · cost · 5h limit · 7d limit`. The context-percentage segment is color-coded:
+`folder · model · ctx % · est $… · 5h limit · 7d limit`. `est —` means the current payload had no valid numeric estimate. The context-percentage segment is color-coded:
 
 - **green** `< 50 %` — plenty of headroom
 - **yellow** `50–79 %` — keep an eye on it
@@ -272,9 +277,9 @@ The `5h` and `7d` rate-limit segments (e.g. `5h 23% (2h0m) │ 7d 41% (2d7h)`) a
 - **Magenta** — project name column.
 - **Cyan** — table headers, the `t/s` and `out/s` columns (the latter in **bold cyan** for emphasis), and the folder name in the status bar.
 - **Dim** — `Cache R` column and separators, deliberately de-emphasized because cache reads are cheap and plentiful.
-- The **TOTAL** footer highlights the summed token count on dark-cyan and, if non-zero, the summed cost on green.
+- The **TOTAL** footer highlights the summed token count on dark-cyan and the complete known estimate on green, including a known `$0.00`. It shows `—` if any visible estimate is unknown.
 
-The `$/h` thresholds are hard-coded in the cost-velocity block of `build_table` (`cc-session-monitor.py:552`). `t/s` and `out/s` are intentionally single-color (informational, not warnings) — see `_fmt_velocity` / `_fmt_output_velocity` (`cc-session-monitor.py:455`). Tweak any of these if your usage pattern makes the defaults feel off.
+The `$/h` thresholds are hard-coded in the cost-velocity block of `build_table`. `t/s` and `out/s` are intentionally single-color (informational, not warnings) — see `_fmt_velocity` / `_fmt_output_velocity`. Tweak any of these if your usage pattern makes the defaults feel off.
 
 ## How it works
 
@@ -296,6 +301,8 @@ The `$/h` thresholds are hard-coded in the cost-velocity block of `build_table` 
 ```
 
 - **Dedup**: usage samples are merged per `requestId` using a per-field `MAX` strategy so streaming duplicates don't double-count.
+- **Estimate normalization**: each hook snapshot retains the previous valid raw and observed estimate. A lower raw counter increments the reset count and starts a new epoch without making the observed session estimate decrease.
+- **Daily attribution**: the monitor adds normalized estimate deltas to the local date of each snapshot. Today's saved baseline is restored on startup; unsafe or unavailable values remain `null`/`—`.
 - **Tail-only reads**: the TUI remembers each JSONL's last-seen size and `seek()`s there; if a file shrinks (rotate / edit) it resets and re-reads from 0.
 - **Atomic snapshots**: the hook writes to a temp path then `mv`s it — a partially written file can never confuse the reader.
 - **Performance**: the hook stays well under Claude Code's 300 ms turn throttle (no network, `jq` only, single stdin read).
@@ -312,7 +319,7 @@ The monitor persists a JSON snapshot per calendar day to `~/.claude/session-moni
 
 ### Reconstruction
 
-If the monitor was not running yesterday or the day before, those daily files are reconstructed from Claude Code's JSONL transcripts on the next startup. Reconstructed files have `"reconstructed": true` and `"session_cumulative_cost_usd": null` on every session, because the cumulative cost snapshot in the hook's data cannot be reliably attributed to one specific day after the fact. Token counts are still accurate (modulo the known JSONL placeholder issue).
+If the monitor was not running yesterday or the day before, those daily files are reconstructed from Claude Code's JSONL transcripts on the next startup. Reconstructed files have `"reconstructed": true`, `"estimated_cost_usd": null`, and `"session_cumulative_cost_usd": null` on every session because no post-hoc JSONL calculation can reproduce the hook estimate or attribute it safely to one day. Token counts retain the known JSONL placeholder caveat.
 
 ### CLI
 
@@ -340,24 +347,36 @@ Daily JSON (and one JSONL line in the monthly file, minus `generated_at`):
       "output_tokens": 6789,
       "cache_read_tokens": 98765,
       "cache_creation_tokens": 4321,
-      "session_cumulative_cost_usd": 2.34
+      "estimated_cost_usd": 4.25,
+      "last_observed_total_cost_usd": 12.75,
+      "last_raw_cost_usd": 1.50,
+      "cost_counter_resets": 2,
+      "last_cost_ts": 1776945600.0,
+      "session_cumulative_cost_usd": 1.50
     }
   },
   "totals": {
     "sessions": 1,
     "input_tokens": 12345,
-    "...": "same fields summed",
-    "session_cumulative_cost_usd": 2.34
+    "...": "token fields summed",
+    "estimated_cost_usd": 4.25,
+    "session_cumulative_cost_usd": 1.50
   }
 }
 ```
 
-`sessions` is keyed by session UUID so external tools can join/diff across days. Token counts are the sum of usage samples whose timestamps fell within that local calendar date — not cumulative session totals. `session_cumulative_cost_usd` is the session lifetime cumulative `total_cost_usd` seen at the most recent tick of that day, not spend attributable to that day alone; summing it across dates will double-count multi-day sessions. For reconstructed files it is `null`.
+`sessions` is keyed by session UUID so external tools can join/diff across days. Token counts are the sum of usage samples whose timestamps fell within that local calendar date — not cumulative session totals.
+
+- `estimated_cost_usd` is the sum of observed estimate deltas attributed to that local date. It is `null` when there is no safe baseline, when the normalized total decreases unexpectedly, or when the file was reconstructed. The daily total is also `null` if any session is unknown.
+- `last_observed_total_cost_usd`, `last_raw_cost_usd`, `cost_counter_resets`, and `last_cost_ts` let the next monitor process resume the attribution baseline without double-counting.
+- `session_cumulative_cost_usd` is a deprecated compatibility field containing the latest raw session counter. It is not attributable daily spend and must not be summed across dates. Older history files without the new fields remain readable.
 
 ## Known limitations
 
-- **JSONL input/output tokens undercount.** This is a property of Claude Code's transcripts (see [gille.ai's analysis](https://gille.ai/)), not of this tool. The `Input` / `Output` / `Total` columns are always JSONL-derived (since CC v2.1.132 the hook no longer exposes cumulative token totals — only current context-window occupancy, shown separately in `Ctx`), so they slightly undercount real billed tokens regardless of the row marker. The `●`/`○` marker reflects only whether hook-backed `Cost` and the `Ctx` gauge are available.
-- **`out/s` inherits that undercount.** It's computed from the same JSONL `output_tokens` field. The hook only snapshots cumulative state, not a series, so we can't build a hook-backed rate. `out/s` is reliable for "is the model generating, roughly how fast", but not for billing math — use `Cost`/`$/h` for that.
+- **Dollar values are estimates, not bills.** Claude Code computes `total_cost_usd` client-side at standard API list prices. Pro/Max included usage is not a per-session charge, and third-party providers can price requests differently. Use the Claude Console Usage and Cost API or the provider's billing console for authoritative amounts.
+- **Counter continuity is observational.** The hook makes resets monotonic by retaining the previous atomic snapshot. Deleting snapshots or first installing the updated hook starts a new observation baseline; unsafe Today/history attribution stays `null`/`—` instead of being guessed.
+- **JSONL input/output tokens undercount.** This is a property of Claude Code's transcripts (see [gille.ai's analysis](https://gille.ai/)), not of this tool. The `Input` / `Output` / `Total` columns are always JSONL-derived (since CC v2.1.132 the hook no longer exposes cumulative token totals — only current context-window occupancy, shown separately in `Ctx`), so they slightly undercount API usage regardless of the row marker. The `●`/`○` marker reflects only whether a hook snapshot and the `Ctx` gauge are available.
+- **`out/s` inherits that undercount.** It is computed from the same JSONL `output_tokens` field. The hook only snapshots cumulative state, not an output-token series, so `out/s` is useful for "is the model generating, roughly how fast", not billing math. `Est. … $` and `$/h` are list-price estimates, not substitutes for provider billing data.
 - **Cache tokens come from JSONL only** — the `statusLine` payload doesn't expose them directly. They are reliable there.
 - **Sessions outside `~/.claude/projects/`** (rare) are discovered only when the hook fires, since discovery normally walks that directory.
 
@@ -376,7 +395,7 @@ Daily JSON (and one JSONL line in the monthly file, minus `generated_at`):
 
 ## Development
 
-There is no build step and no lint config. Unit tests (pytest, covering `cc_history.py` and `install_hook`):
+There is no build step and no lint config. Unit tests cover history, both hook contracts, installation, context handling, cost attribution/rendering, and the effort footer:
 
 ```bash
 ./.venv/bin/pip install -r requirements-dev.txt    # first time only
