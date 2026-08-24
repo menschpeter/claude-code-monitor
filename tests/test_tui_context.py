@@ -116,7 +116,7 @@ def test_build_table_input_output_use_jsonl_not_hook():
     state.last_ts = now
     # Hook current-context values that MUST NOT leak into Input/Output.
     state.hook_ts = now
-    state.hook_cost_usd = 4.2
+    state.hook_raw_cost_usd = 4.2
     state.hook_ctx_input = 78_000
     state.hook_ctx_output = 200
     state.hook_ctx_size = 200_000
@@ -206,6 +206,20 @@ def test_old_session_without_baseline_has_unknown_today_cost():
     assert state.estimated_cost_by_date["2026-08-24"] is None
 
 
+def test_first_observation_replaces_unknown_placeholder_when_started_today():
+    m = _load_monitor_module()
+    state = _state_started_at(m, _local_ts(2026, 8, 24, 9, 0))
+    # Reconstructed/legacy daily history can restore an explicit unknown
+    # without a usable observed-total baseline.
+    state.estimated_cost_by_date["2026-08-24"] = None
+
+    state.record_cost_observation(
+        _local_ts(2026, 8, 24, 9, 5), 3.0, 3.0, 0
+    )
+
+    assert state.estimated_cost_by_date["2026-08-24"] == 3.0
+
+
 def test_restored_daily_baseline_adds_only_new_delta(tmp_path):
     m = _load_monitor_module()
     entry = m.DailySessionEntry(
@@ -267,6 +281,47 @@ def test_decreasing_normalized_total_invalidates_day():
     )
 
     assert state.estimated_cost_by_date["2026-08-24"] is None
+
+
+def test_snapshot_cost_velocity_uses_observed_total_across_raw_reset():
+    m = _load_monitor_module()
+    monitor = m.Monitor.__new__(m.Monitor)
+    monitor.sessions = {}
+    monitor._snapshot_mtimes = {}
+    monitor._restored_date = None
+    monitor._restored_cost_entries = {}
+    first_ts = _local_ts(2026, 8, 24, 9, 0)
+    state = _state_started_at(m, first_ts)
+    monitor.sessions[state.session_id] = state
+
+    monitor._apply_snapshot(
+        {
+            "session_id": "s",
+            "snapshot_ts": first_ts,
+            "cost": {
+                "total_cost_usd": 10.0,
+                "observed_total_cost_usd": 10.0,
+                "counter_resets": 0,
+            },
+        }
+    )
+    monitor._apply_snapshot(
+        {
+            "session_id": "s",
+            "snapshot_ts": first_ts + 60,
+            "cost": {
+                "total_cost_usd": 0.5,
+                "observed_total_cost_usd": 10.5,
+                "counter_resets": 1,
+            },
+        }
+    )
+
+    assert list(state.cost_points) == [
+        (first_ts, 10.0),
+        (first_ts + 60, 10.5),
+    ]
+    assert state.cost_velocity(120, first_ts + 60) == 30.0
 
 
 def test_cost_observation_retains_previous_day_total_after_midnight():

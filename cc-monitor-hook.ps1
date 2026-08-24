@@ -259,7 +259,7 @@ $ctx_color = if ($ctx_int -lt 50) { $GREEN } elseif ($ctx_int -lt 80) { $YELLOW 
 
 # Format cost. Missing/non-numeric input is unknown, never a synthetic zero.
 $cost_fmt = if ($null -eq $cost_usd) {
-    '—'
+    [string][char]0x2014
 } elseif ([double]$cost_usd -lt 0.01) {
     '$' + ([double]$cost_usd).ToString("0.0000")
 } elseif ([double]$cost_usd -lt 1) {

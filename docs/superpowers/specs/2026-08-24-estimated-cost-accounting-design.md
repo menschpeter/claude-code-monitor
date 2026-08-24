@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-24
 
-**Status:** Approved in chat; awaiting review of this written specification
+**Status:** Approved and implemented on `codex/estimated-cost-accounting`
 
 ## Context
 
@@ -90,7 +90,7 @@ Restart restoration / monthly retention
 
 ## Snapshot schema and hook behavior
 
-The existing `cost` object remains, with three additions:
+The existing `cost` object remains, with normalization-state additions:
 
 ```json
 {
@@ -98,6 +98,7 @@ The existing `cost` object remains, with three additions:
     "total_cost_usd": 1.25,
     "observed_total_cost_usd": 3.75,
     "last_valid_raw_cost_usd": 1.25,
+    "last_valid_observed_total_cost_usd": 3.75,
     "counter_resets": 2,
     "total_duration_ms": 45000,
     "total_api_duration_ms": 2300,
@@ -131,8 +132,10 @@ This keeps hook upgrades continuous without rewriting old files.
 
 If the new payload lacks a valid raw estimate, the snapshot exposes
 `total_cost_usd: null` and `observed_total_cost_usd: null` so the UI reports
-unknown. `last_valid_raw_cost_usd` and `counter_resets` retain their previous
-values internally, allowing a later valid payload to continue normalization.
+unknown. `last_valid_raw_cost_usd`,
+`last_valid_observed_total_cost_usd`, and `counter_resets` retain their
+previous values internally, allowing a later valid payload to continue
+normalization without losing earlier epochs.
 
 Both POSIX and PowerShell hooks implement the same algorithm. Snapshot writes
 remain temp-file-plus-rename operations. No journal, network access, price
@@ -144,10 +147,10 @@ lookup, or unbounded file is added.
 
 - `hook_raw_cost_usd`: latest valid raw Claude estimate or `None`.
 - `hook_observed_cost_usd`: latest monotonic observed total or `None`.
-- `hook_cost_reset_count`: reset count supplied by the hook.
+- `cost_counter_resets`: reset count supplied by the hook.
 - `cost_points`: `(timestamp, observed_total)` points for `$/h`.
 - `estimated_cost_by_date`: local ISO date to estimated daily cost or `None`.
-- `last_cost_observation`: timestamp and observed total used for day deltas.
+- `last_cost_ts` and `last_cost_observed_total`: baseline used for day deltas.
 
 On each valid snapshot, the monitor computes the non-negative difference
 between the new and previous observed total. Because reset normalization

@@ -21,7 +21,7 @@ The [`statusLine` API](https://code.claude.com/docs/en/statusline) receives `cos
 
 Rows in the TUI are marked `●` when a hook snapshot is present or `○` when only JSONL is available. A `●` means live snapshot data exists; the estimate can still be `—` when Claude did not provide a valid value or the day cannot be attributed safely.
 
-For billing and organization-wide reporting, use the [Claude Console Usage and Cost API](https://platform.claude.com/docs/en/api/usage-cost-api) or the billing console of the API provider that actually handled the request.
+For billing and organization-wide reporting, use the [Claude Console Usage and Cost API](https://platform.claude.com/docs/en/manage-claude/usage-cost-api) or the billing console of the API provider that actually handled the request.
 
 > **Note (Claude Code v2.1.132+):** the hook's `context_window.total_input_tokens` / `total_output_tokens` now report *current context-window occupancy*, not cumulative session totals. The TUI surfaces those in a dedicated **Ctx** column and always derives cumulative Input/Output from the JSONL transcript.
 

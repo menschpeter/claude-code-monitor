@@ -204,15 +204,6 @@ class SessionState:
             return 0.0
         return max(0.0, (c1 - c0) / dt * 3600.0)
 
-    @property
-    def hook_cost_usd(self) -> float | None:
-        """Deprecated internal alias for the raw Claude estimate."""
-        return self.hook_raw_cost_usd
-
-    @hook_cost_usd.setter
-    def hook_cost_usd(self, value: float | None) -> None:
-        self.hook_raw_cost_usd = value
-
     def record_cost_observation(
         self,
         ts: float,
@@ -229,9 +220,14 @@ class SessionState:
                 self.first_ts is not None
                 and datetime.fromtimestamp(self.first_ts).date() == day
             )
-            self.estimated_cost_by_date.setdefault(
-                day_key, observed if started_today else None
-            )
+            if started_today:
+                # A reconstructed/legacy record may have restored an explicit
+                # unknown without an observed-total baseline. The complete
+                # first session total is still attributable when JSONL proves
+                # that the session itself began on this local date.
+                self.estimated_cost_by_date[day_key] = observed
+            else:
+                self.estimated_cost_by_date.setdefault(day_key, None)
         elif observed < self.last_cost_observed_total:
             # A normalized total must be monotonic. If state was lost or
             # corrupted, retain tokens but stop claiming a dollar value today.
@@ -691,7 +687,9 @@ def build_table(
     table.add_column("Ctx", justify="right")
     table.add_column("t/s", justify="right")
     table.add_column("out/s", justify="right")
-    cost_header = "Est. today $" if cost_scope_date else "Est. session $"
+    cost_header = (
+        "Est. today $" if cost_scope_date is not None else "Est. session $"
+    )
     table.add_column(cost_header, justify="right", style="green")
     table.add_column("$/h", justify="right")
 
