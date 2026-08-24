@@ -45,6 +45,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import json
+import math
 import os
 import sys
 import time
@@ -133,13 +134,9 @@ class SessionState:
     last_ts: float | None = None
 
     # ----- hook-derived fields (None until the hook fires at least once) -----
-    # hook_cost_usd is the only ACCURATE cumulative figure here. As of Claude
-    # Code v2.1.132 the context_window token fields are *current context-window
-    # occupancy* (from the most recent API response), NOT cumulative session
-    # totals — so they drive the live "Ctx" gauge, while cumulative Input/Output
-    # come from the JSONL transcript (see build_table).
     hook_ts: float | None = None            # when the last snapshot was written
-    hook_cost_usd: float | None = None      # cost.total_cost_usd (cumulative)
+    hook_raw_cost_usd: float | None = None  # latest raw list-price estimate
+    hook_observed_cost_usd: float | None = None  # reset-safe session estimate
     hook_ctx_pct: float | None = None       # context_window.used_percentage (live)
     hook_ctx_input: int | None = None       # context_window.total_input_tokens (live)
     hook_ctx_output: int | None = None      # context_window.total_output_tokens (live)
@@ -157,6 +154,11 @@ class SessionState:
 
     # rolling history of (ts, cost_usd) for $/h velocity
     cost_points: deque = field(default_factory=lambda: deque(maxlen=500))
+    estimated_cost_by_date: dict[str, float | None] = field(default_factory=dict)
+    last_cost_observed_total: float | None = None
+    last_cost_raw: float | None = None
+    cost_counter_resets: int = 0
+    last_cost_ts: float | None = None
 
     # ----- aggregates -----
 
@@ -201,6 +203,64 @@ class SessionState:
             return 0.0
         return max(0.0, (c1 - c0) / dt * 3600.0)
 
+    @property
+    def hook_cost_usd(self) -> float | None:
+        """Deprecated internal alias for the raw Claude estimate."""
+        return self.hook_raw_cost_usd
+
+    @hook_cost_usd.setter
+    def hook_cost_usd(self, value: float | None) -> None:
+        self.hook_raw_cost_usd = value
+
+    def record_cost_observation(
+        self,
+        ts: float,
+        observed: float,
+        raw: float | None,
+        resets: int,
+    ) -> None:
+        """Attribute one normalized session-total observation to a local day."""
+        day = datetime.fromtimestamp(ts).date()
+        day_key = day.isoformat()
+
+        if self.last_cost_observed_total is None:
+            started_today = (
+                self.first_ts is not None
+                and datetime.fromtimestamp(self.first_ts).date() == day
+            )
+            self.estimated_cost_by_date.setdefault(
+                day_key, observed if started_today else None
+            )
+        elif observed < self.last_cost_observed_total:
+            # A normalized total must be monotonic. If state was lost or
+            # corrupted, retain tokens but stop claiming a dollar value today.
+            self.estimated_cost_by_date[day_key] = None
+        else:
+            delta = observed - self.last_cost_observed_total
+            if day_key not in self.estimated_cost_by_date:
+                self.estimated_cost_by_date[day_key] = delta
+            elif self.estimated_cost_by_date[day_key] is not None:
+                self.estimated_cost_by_date[day_key] += delta
+
+        self.last_cost_observed_total = observed
+        if raw is not None:
+            self.last_cost_raw = raw
+        self.cost_counter_resets = max(0, resets)
+        self.last_cost_ts = ts
+
+        if self.cost_points and self.cost_points[-1][0] == ts:
+            self.cost_points[-1] = (ts, observed)
+        elif not self.cost_points or self.cost_points[-1][0] < ts:
+            self.cost_points.append((ts, observed))
+
+        # Only these two dates are needed for midnight rollover and persistence.
+        keep = {day_key, (day - timedelta(days=1)).isoformat()}
+        self.estimated_cost_by_date = {
+            key: value
+            for key, value in self.estimated_cost_by_date.items()
+            if key in keep
+        }
+
     def effective_last_ts(self) -> float | None:
         """Latest signal of activity — from JSONL or from the hook snapshot."""
         candidates = [t for t in (self.last_ts, self.hook_ts) if t is not None]
@@ -217,12 +277,37 @@ class Monitor:
         root: Path = CLAUDE_PROJECTS_DIR,
         snapshot_dir: Path = SNAPSHOT_DIR,
         velocity_window: int = VELOCITY_WINDOW_SECONDS,
+        restored_date: str | None = None,
+        restored_cost_entries: dict[str, DailySessionEntry] | None = None,
     ) -> None:
         self.root = root
         self.snapshot_dir = snapshot_dir
         self.velocity_window = velocity_window
         self.sessions: dict[str, SessionState] = {}  # key = session_id
         self._snapshot_mtimes: dict[str, float] = {}  # session_id -> last mtime seen
+        self._restored_date = restored_date
+        self._restored_cost_entries = dict(restored_cost_entries or {})
+
+    def _restore_cost_state(self, state: SessionState) -> None:
+        """Restore one persisted cost baseline exactly once per session."""
+        entries = getattr(self, "_restored_cost_entries", None)
+        restored_date = getattr(self, "_restored_date", None)
+        if not entries or not restored_date:
+            return
+        entry = entries.pop(state.session_id, None)
+        if entry is None:
+            return
+
+        state.estimated_cost_by_date[restored_date] = entry.estimated_cost_usd
+        state.last_cost_observed_total = entry.last_observed_total_cost_usd
+        state.last_cost_raw = entry.last_raw_cost_usd
+        state.cost_counter_resets = entry.cost_counter_resets
+        state.last_cost_ts = entry.last_cost_ts
+        state.hook_model = entry.model
+        if entry.last_cost_ts is not None and entry.last_observed_total_cost_usd is not None:
+            state.cost_points.append(
+                (entry.last_cost_ts, entry.last_observed_total_cost_usd)
+            )
 
     # ---- discovery ----
 
@@ -252,6 +337,7 @@ class Monitor:
                     project=project,
                     jsonl_path=jsonl,
                 )
+                self._restore_cost_state(state)
                 self.sessions[session_id] = state
 
             if size == state.file_size:
@@ -377,6 +463,7 @@ class Monitor:
                 project=project,
                 jsonl_path=jsonl_path,
             )
+            self._restore_cost_state(state)
             self.sessions[session_id] = state
 
         snap_ts = float(data.get("snapshot_ts") or 0.0)
@@ -387,8 +474,17 @@ class Monitor:
         cost = data.get("cost") or {}
         rl5 = (data.get("rate_limits") or {}).get("five_hour") or {}
 
+        def optional_float(value) -> float | None:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return None
+            result = float(value)
+            return result if math.isfinite(result) else None
+
         state.hook_ts = snap_ts
-        state.hook_cost_usd = float(cost.get("total_cost_usd") or 0.0)
+        state.hook_raw_cost_usd = optional_float(cost.get("total_cost_usd"))
+        state.hook_observed_cost_usd = optional_float(
+            cost.get("observed_total_cost_usd")
+        )
         state.hook_ctx_pct = float(ctx.get("used_percentage") or 0.0)
         state.hook_ctx_input = int(ctx.get("total_input_tokens") or 0)
         state.hook_ctx_output = int(ctx.get("total_output_tokens") or 0)
@@ -399,11 +495,15 @@ class Monitor:
         reset = rl5.get("resets_at")
         state.hook_rl5_reset = int(reset) if reset else None
 
-        # Append to cost history (for $/h velocity). Dedup by ts to avoid
-        # noise if the hook re-fires with the same snapshot.
-        if (not state.cost_points
-                or state.cost_points[-1][0] < snap_ts):
-            state.cost_points.append((snap_ts, state.hook_cost_usd))
+        resets_value = optional_float(cost.get("counter_resets"))
+        resets = int(resets_value) if resets_value is not None else 0
+        if state.hook_observed_cost_usd is not None:
+            state.record_cost_observation(
+                snap_ts,
+                state.hook_observed_cost_usd,
+                state.hook_raw_cost_usd,
+                resets,
+            )
 
     # ---- views ----
 
@@ -436,7 +536,7 @@ class Monitor:
         calendar date == `target_date`. Token fields are summed across
         samples within that day only.
 
-        Caveat on session_cumulative_cost_usd: taken from hook_cost_usd
+        Caveat on session_cumulative_cost_usd: taken from hook_raw_cost_usd
         which is cumulative across the session's lifetime. When a session
         spans multiple days, each day's file records the same cumulative
         figure — aggregators that sum it across multiple daily files will
@@ -459,7 +559,14 @@ class Monitor:
                 output_tokens=sum(s.output_tokens for s in day_samples),
                 cache_read_tokens=sum(s.cache_read for s in day_samples),
                 cache_creation_tokens=sum(s.cache_creation for s in day_samples),
-                session_cumulative_cost_usd=state.hook_cost_usd,
+                session_cumulative_cost_usd=state.hook_raw_cost_usd,
+                estimated_cost_usd=state.estimated_cost_by_date.get(
+                    target_date.isoformat()
+                ),
+                last_observed_total_cost_usd=state.last_cost_observed_total,
+                last_raw_cost_usd=state.last_cost_raw,
+                cost_counter_resets=state.cost_counter_resets,
+                last_cost_ts=state.last_cost_ts,
             )
         return out
 

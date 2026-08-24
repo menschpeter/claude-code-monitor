@@ -18,6 +18,7 @@ import io
 import json
 import sys
 import time
+from datetime import date, datetime
 from pathlib import Path
 
 from rich.console import Console
@@ -167,6 +168,140 @@ def _assistant(effort: str | None, ts: str, req_id: str, with_usage: bool = True
                       "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
         }
     return entry
+
+
+def _local_ts(year, month, day, hour, minute=0):
+    return datetime(year, month, day, hour, minute).timestamp()
+
+
+def _state_started_at(m, ts):
+    state = m.SessionState("s", "proj", Path("/tmp/s.jsonl"))
+    state.first_ts = ts
+    state.last_ts = ts
+    return state
+
+
+def test_cost_observations_accumulate_by_local_date():
+    m = _load_monitor_module()
+    state = _state_started_at(m, _local_ts(2026, 8, 24, 9, 0))
+
+    state.record_cost_observation(
+        _local_ts(2026, 8, 24, 9, 5), 10.0, 10.0, 0
+    )
+    state.record_cost_observation(
+        _local_ts(2026, 8, 24, 10, 0), 12.5, 0.5, 1
+    )
+
+    assert state.estimated_cost_by_date["2026-08-24"] == 12.5
+
+
+def test_old_session_without_baseline_has_unknown_today_cost():
+    m = _load_monitor_module()
+    state = _state_started_at(m, _local_ts(2026, 8, 23, 9, 0))
+
+    state.record_cost_observation(
+        _local_ts(2026, 8, 24, 9, 0), 12.5, 0.5, 1
+    )
+
+    assert state.estimated_cost_by_date["2026-08-24"] is None
+
+
+def test_restored_daily_baseline_adds_only_new_delta(tmp_path):
+    m = _load_monitor_module()
+    entry = m.DailySessionEntry(
+        project="proj",
+        model="Opus",
+        first_ts=1.0,
+        last_ts=2.0,
+        input_tokens=10,
+        output_tokens=5,
+        cache_read_tokens=0,
+        cache_creation_tokens=0,
+        session_cumulative_cost_usd=0.5,
+        estimated_cost_usd=4.0,
+        last_observed_total_cost_usd=10.0,
+        last_cost_ts=_local_ts(2026, 8, 24, 10, 0),
+    )
+    project = tmp_path / "projects" / "-tmp-proj"
+    project.mkdir(parents=True)
+    _write_jsonl(
+        project / "s.jsonl",
+        [_assistant("high", "2026-08-24T09:00:00Z", "r1")],
+    )
+    snapshots = tmp_path / "snapshots"
+    snapshots.mkdir()
+    (snapshots / "s.json").write_text(
+        json.dumps(
+            {
+                "session_id": "s",
+                "snapshot_ts": _local_ts(2026, 8, 24, 11, 0),
+                "cost": {
+                    "total_cost_usd": 1.0,
+                    "observed_total_cost_usd": 11.5,
+                    "counter_resets": 1,
+                },
+            }
+        )
+    )
+    monitor = m.Monitor(
+        root=tmp_path / "projects",
+        snapshot_dir=snapshots,
+        restored_date="2026-08-24",
+        restored_cost_entries={"s": entry},
+    )
+
+    monitor.refresh()
+
+    assert monitor.sessions["s"].estimated_cost_by_date["2026-08-24"] == 5.5
+
+
+def test_decreasing_normalized_total_invalidates_day():
+    m = _load_monitor_module()
+    state = _state_started_at(m, _local_ts(2026, 8, 24, 9, 0))
+    state.record_cost_observation(
+        _local_ts(2026, 8, 24, 9, 5), 10.0, 10.0, 0
+    )
+
+    state.record_cost_observation(
+        _local_ts(2026, 8, 24, 9, 6), 2.0, 2.0, 0
+    )
+
+    assert state.estimated_cost_by_date["2026-08-24"] is None
+
+
+def test_cost_observation_retains_previous_day_total_after_midnight():
+    m = _load_monitor_module()
+    state = _state_started_at(m, _local_ts(2026, 8, 23, 9, 0))
+
+    state.record_cost_observation(
+        _local_ts(2026, 8, 23, 23, 50), 10.0, 10.0, 0
+    )
+    state.record_cost_observation(
+        _local_ts(2026, 8, 24, 0, 10), 11.5, 11.5, 0
+    )
+
+    assert state.estimated_cost_by_date["2026-08-23"] == 10.0
+    assert state.estimated_cost_by_date["2026-08-24"] == 1.5
+
+
+def test_entries_for_date_persists_attributable_cost_state(tmp_path):
+    m = _load_monitor_module()
+    ts = _local_ts(2026, 8, 24, 9, 0)
+    monitor = m.Monitor(
+        root=tmp_path / "projects", snapshot_dir=tmp_path / "snapshots"
+    )
+    state = _state_started_at(m, ts)
+    state.samples["r1"] = m.UsageSample(ts=ts, input_tokens=10, output_tokens=5)
+    state.record_cost_observation(ts + 60, 3.0, 0.5, 1)
+    monitor.sessions[state.session_id] = state
+
+    entry = monitor.entries_for_date(date(2026, 8, 24), ts + 60)["s"]
+
+    assert entry.estimated_cost_usd == 3.0
+    assert entry.last_observed_total_cost_usd == 3.0
+    assert entry.last_raw_cost_usd == 0.5
+    assert entry.cost_counter_resets == 1
+    assert entry.last_cost_ts == ts + 60
 
 
 def test_refresh_captures_effort_from_newest_assistant_line(tmp_path):
