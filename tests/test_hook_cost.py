@@ -67,6 +67,7 @@ def _run_windows_hook(tmp_path: Path, payload: dict) -> HookRun:
         ],
         input=json.dumps(payload),
         text=True,
+        encoding="utf-8",
         capture_output=True,
         check=True,
         env={**os.environ, "CC_MONITOR_SNAPSHOT_DIR": str(snapshot_dir)},
@@ -164,6 +165,4 @@ def test_windows_hook_preserves_missing_cost_as_null(tmp_path):
     snap = _run_windows_hook(tmp_path, _payload_without_cost())
     assert snap["cost"]["total_cost_usd"] is None
     assert snap["cost"]["observed_total_cost_usd"] is None
-    marker = snap.status_line.partition("est ")[2][:1]
-    assert marker
-    assert ord(marker) == 0x2014
+    assert "est \N{EM DASH}" in snap.status_line
