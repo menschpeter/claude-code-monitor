@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 cc-session-monitor — live Terminal UI for tracking Claude Code token usage
-per active session, with token/s velocity. Part of the claude-code-monitor
-project.
+and estimated API list-price cost per active session, with token/s velocity.
+Part of the claude-code-monitor project.
 
 Reads Claude Code's JSONL transcripts under ~/.claude/projects/<project>/*.jsonl
 and renders two side-by-side panels:
@@ -21,8 +21,8 @@ For each session the monitor shows:
 
 Known caveat (documented issue in Claude Code JSONL logs):
   input_tokens and output_tokens in the JSONL are streaming placeholders
-  and undercount vs. the real billed amounts (see gille.ai analysis).
-  Cache fields are accurate. The tool deduplicates by requestId and uses
+  and undercount API usage (see gille.ai analysis). Cache fields are reliable.
+  The tool deduplicates by requestId and uses
   per-requestId MAX to mitigate streaming duplicates, but absolute
   input/output numbers remain approximate. Velocity and relative trends
   between sessions are still meaningful.
@@ -31,7 +31,8 @@ Note (Claude Code v2.1.132+):
   The hook's context_window.total_input_tokens / total_output_tokens report
   *current context-window occupancy*, not cumulative session totals, so they
   feed the live "Ctx" gauge only — cumulative Input/Output come from JSONL.
-  The hook remains the sole accurate source of cumulative cost.
+  The hook supplies Claude Code's client-side standard-list-price estimate.
+  It is useful for comparisons, but is not authoritative billing.
 
 Usage:
     python cc-session-monitor.py
@@ -536,11 +537,9 @@ class Monitor:
         calendar date == `target_date`. Token fields are summed across
         samples within that day only.
 
-        Caveat on session_cumulative_cost_usd: taken from hook_raw_cost_usd
-        which is cumulative across the session's lifetime. When a session
-        spans multiple days, each day's file records the same cumulative
-        figure — aggregators that sum it across multiple daily files will
-        double-count. See README "History" section.
+        session_cumulative_cost_usd is retained as a deprecated compatibility
+        field containing the latest raw hook counter. It is neither reset-safe
+        nor date-attributable; consumers must use estimated_cost_usd instead.
         """
         out: dict[str, DailySessionEntry] = {}
         for state in self.sessions.values():
@@ -716,7 +715,7 @@ def build_table(
         out_vel = s.output_velocity(velocity_window, now)
 
         # Cumulative Input/Output come from the JSONL transcript (merge-by-
-        # requestId). These undercount real billed output slightly (the JSONL
+        # requestId). These undercount API output slightly (the JSONL
         # fields are streaming placeholders) but they are monotonic and
         # cumulative. The hook's context_window totals can NOT be used here:
         # since CC v2.1.132 they report current context occupancy, not session

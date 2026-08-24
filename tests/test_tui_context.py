@@ -545,6 +545,17 @@ def test_build_layout_footer_keeps_existing_legend(tmp_path):
     assert "effort: high" in text
 
 
+def test_footer_labels_dollar_values_as_estimates(tmp_path):
+    m = _load_monitor_module()
+    monitor = m.Monitor(tmp_path / "projects", tmp_path / "snapshots")
+
+    text = _footer_text(m.build_layout(monitor, 30))
+
+    assert "estimate" in text.lower()
+    assert "accurate Cost" not in text
+    assert "authoritative" not in text
+
+
 # ---------------------------------------------------------------------------
 # footer at fixed terminal widths — regression for the clipping bug
 #

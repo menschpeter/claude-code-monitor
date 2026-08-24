@@ -9,7 +9,7 @@ The live monitor (cc-session-monitor.py) owns the in-memory session state
 and hands it to HistoryLogger at each write tick. For gaps when the monitor
 was not running, reconstruct_missing_days scans Claude Code's JSONL
 transcripts and writes reconstructed=true files with
-session_cumulative_cost_usd=null.
+estimated_cost_usd=null and session_cumulative_cost_usd=null.
 """
 from __future__ import annotations
 

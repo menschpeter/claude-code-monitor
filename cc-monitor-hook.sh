@@ -4,8 +4,8 @@
 #
 # Does two jobs on every status update:
 #   1. Writes a session snapshot JSON to ~/.claude/session-monitor/snapshots/
-#      so the external TUI monitor can pick up accurate cost + context window
-#      token totals that aren't otherwise exposed.
+#      so the external TUI monitor can pick up Claude Code's client-side cost
+#      estimate plus context-window values that aren't otherwise exposed.
 #   2. Prints a compact one-line status into Claude Code's status bar.
 #
 # Performance notes (from Claude Code docs):
@@ -41,6 +41,9 @@
 # NOTE on the payload shape: the per-request cache token counts live under
 # context_window.current_usage (null until the first API response), NOT flat on
 # context_window. See the statusLine schema in the Claude Code docs.
+# `cost.total_cost_usd` is an estimated standard-API-list-price equivalent,
+# not authoritative billing. The snapshot also normalizes raw counter resets
+# into an observed session total; the status bar labels the raw value `est`.
 
 set -u  # intentionally NOT -e: a broken snapshot must not kill the statusline
 
