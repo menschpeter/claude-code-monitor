@@ -115,11 +115,11 @@ if [ -n "$session_id" ]; then
   if printf '%s' "$INPUT" | jq --arg ts "$now_ts" --argjson prev "$previous_cost" '
       def numeric_or_null: if type == "number" then . else null end;
       (.cost.total_cost_usd | numeric_or_null) as $raw
-      | ($prev.last_valid_raw_cost_usd | numeric_or_null)
-          // ($prev.total_cost_usd | numeric_or_null) as $prev_raw
-      | ($prev.last_valid_observed_total_cost_usd | numeric_or_null)
+      | (($prev.last_valid_raw_cost_usd | numeric_or_null)
+          // ($prev.total_cost_usd | numeric_or_null)) as $prev_raw
+      | (($prev.last_valid_observed_total_cost_usd | numeric_or_null)
           // ($prev.observed_total_cost_usd | numeric_or_null)
-          // ($prev.total_cost_usd | numeric_or_null) as $prev_observed
+          // ($prev.total_cost_usd | numeric_or_null)) as $prev_observed
       | (($prev.counter_resets | numeric_or_null) // 0 | floor) as $prev_resets
       | (if $raw == null then
           {

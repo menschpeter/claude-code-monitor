@@ -110,7 +110,7 @@ def test_posix_hook_preserves_missing_cost_as_null(tmp_path):
     snap = _run_posix_hook(tmp_path, _payload_without_cost())
     assert snap["cost"]["total_cost_usd"] is None
     assert snap["cost"]["observed_total_cost_usd"] is None
-    assert "est —" in snap.status_line
+    assert "est \N{EM DASH}" in snap.status_line
 
 
 def test_posix_hook_resumes_from_last_valid_state_after_missing_cost(tmp_path):
@@ -164,4 +164,4 @@ def test_windows_hook_preserves_missing_cost_as_null(tmp_path):
     snap = _run_windows_hook(tmp_path, _payload_without_cost())
     assert snap["cost"]["total_cost_usd"] is None
     assert snap["cost"]["observed_total_cost_usd"] is None
-    assert "est —" in snap.status_line
+    assert "est \N{EM DASH}" in snap.status_line
