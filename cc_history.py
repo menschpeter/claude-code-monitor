@@ -126,6 +126,11 @@ class DailySessionEntry:
     cache_read_tokens: int
     cache_creation_tokens: int
     session_cumulative_cost_usd: float | None
+    estimated_cost_usd: float | None = None
+    last_observed_total_cost_usd: float | None = None
+    last_raw_cost_usd: float | None = None
+    cost_counter_resets: int = 0
+    last_cost_ts: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -138,6 +143,11 @@ class DailySessionEntry:
             "cache_read_tokens": self.cache_read_tokens,
             "cache_creation_tokens": self.cache_creation_tokens,
             "session_cumulative_cost_usd": self.session_cumulative_cost_usd,
+            "estimated_cost_usd": self.estimated_cost_usd,
+            "last_observed_total_cost_usd": self.last_observed_total_cost_usd,
+            "last_raw_cost_usd": self.last_raw_cost_usd,
+            "cost_counter_resets": self.cost_counter_resets,
+            "last_cost_ts": self.last_cost_ts,
         }
 
     @classmethod
@@ -157,6 +167,23 @@ class DailySessionEntry:
             session_cumulative_cost_usd=(
                 float(cumulative_cost) if cumulative_cost is not None else None
             ),
+            estimated_cost_usd=(
+                float(d["estimated_cost_usd"])
+                if d.get("estimated_cost_usd") is not None else None
+            ),
+            last_observed_total_cost_usd=(
+                float(d["last_observed_total_cost_usd"])
+                if d.get("last_observed_total_cost_usd") is not None else None
+            ),
+            last_raw_cost_usd=(
+                float(d["last_raw_cost_usd"])
+                if d.get("last_raw_cost_usd") is not None else None
+            ),
+            cost_counter_resets=int(d.get("cost_counter_resets") or 0),
+            last_cost_ts=(
+                float(d["last_cost_ts"])
+                if d.get("last_cost_ts") is not None else None
+            ),
         )
 
 
@@ -168,15 +195,22 @@ class DailyRecord:
     sessions: dict[str, DailySessionEntry] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        any_null = any(
+        any_cumulative_null = any(
             s.session_cumulative_cost_usd is None for s in self.sessions.values()
         )
-        total_cost = (
-            None if any_null
+        cumulative_total = (
+            None if any_cumulative_null
             else sum(
                 s.session_cumulative_cost_usd or 0.0
                 for s in self.sessions.values()
             )
+        )
+        any_estimated_null = any(
+            s.estimated_cost_usd is None for s in self.sessions.values()
+        )
+        estimated_total = (
+            None if any_estimated_null
+            else sum(s.estimated_cost_usd or 0.0 for s in self.sessions.values())
         )
         return {
             "date": self.date,
@@ -189,7 +223,8 @@ class DailyRecord:
                 "output_tokens": sum(s.output_tokens for s in self.sessions.values()),
                 "cache_read_tokens": sum(s.cache_read_tokens for s in self.sessions.values()),
                 "cache_creation_tokens": sum(s.cache_creation_tokens for s in self.sessions.values()),
-                "session_cumulative_cost_usd": total_cost,
+                "session_cumulative_cost_usd": cumulative_total,
+                "estimated_cost_usd": estimated_total,
             },
         }
 
@@ -246,6 +281,14 @@ class HistoryLogger:
         )
         target = self.daily_dir / f"{date}.json"
         self._atomic_write_json(target, rec.to_dict())
+
+    def read_daily(self, date_str: str) -> DailyRecord | None:
+        """Read one daily record, returning None for absent or invalid data."""
+        path = self.daily_dir / f"{date_str}.json"
+        try:
+            return DailyRecord.from_dict(json.loads(path.read_text()))
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+            return None
 
     # -- helpers --------------------------------------------------------
 
